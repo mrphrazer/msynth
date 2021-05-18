@@ -1,0 +1,3 @@
+[submodule "miasm"]
+	path = miasm
+	url = https://github.com/cea-sec/miasm.git
