@@ -239,8 +239,8 @@ class Simplifier:
         """
         # while there is any unification variable remaining in the expression
         while any([v.name.startswith(self._global_variable_prefix) for v in get_unique_variables(expr)]):
-            # reverse unification
-            expr = self._reverse_unification(expr, unification_dict)
+            # replace in expression
+            expr = expr.replace_expr(unification_dict)
 
         return expr
 
@@ -385,7 +385,7 @@ class Simplifier:
         """
         # transform expr to abstract syntax tree
         ast = self._translator_ast.from_expr(expr)
-        # dictionary to map simplified subtrees to placeholder variables
+        # dictionary to map to placeholder variables to simplified subtrees
         global_unification_dict: Dict[Expr, Expr] = {}
         # placeholder variable counter
         global_ctr = 0
@@ -425,8 +425,8 @@ class Simplifier:
                         global_ctr, subtree.size)
                     global_ctr += 1
 
-                    # map simplified subtree to global placeholder variable
-                    global_unification_dict[simplified] = global_variable
+                    # map global placeholder variable to simplified subtree
+                    global_unification_dict[global_variable] = simplified
 
                     # replace original subtree with global placeholder variable
                     ast = ast.replace_expr({subtree: global_variable})
