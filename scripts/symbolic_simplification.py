@@ -7,7 +7,7 @@ from miasm.analysis.machine import Machine
 from miasm.core.locationdb import LocationDB
 from miasm.ir.symbexec import SymbolicExecutionEngine
 
-from msynth.simplifier import Simplifier
+from msynth import Simplifier
 
 
 logger = logging.getLogger("msynth")

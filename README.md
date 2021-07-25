@@ -1,10 +1,15 @@
 # msynth
 Author: **Tim Blazytko** and **Moritz Schloegel**
 
-msynth is a code deobfuscation framework to simplify Mixed Boolean-Arithmetic (MBA) expressions. Given a pre-computed synthesis oracle, it walks over a complex expression represented as an abstract syntax tree (AST) and tries to simplify subtrees based on oracle lookups. 
+msynth is a code deobfuscation framework to simplify Mixed Boolean-Arithmetic (MBA) expressions. Given a pre-computed simplification oracle, it walks over a complex expression represented as an abstract syntax tree (AST) and tries to simplify subtrees based on oracle lookups. Alternatively, it tries to simplify expressions via stochastic program synthesis.  
 
-msynth is built on top of [Miasm](https://github.com/cea-sec/miasm) and inspired by the paper ["QSynth: A Program Synthesis based Approach for Binary Code Deobfuscation"](https://archive.bar/pdfs/bar2020-preprint9.pdf) by
-    Robin David, Luigi Coniglio and Mariano Ceccato (NDSS, BAR 2020).
+msynth is built on top of [Miasm](https://github.com/cea-sec/miasm) and inspired by the papers 
+
+* ["QSynth: A Program Synthesis based Approach for Binary Code Deobfuscation"](https://archive.bar/pdfs/bar2020-preprint9.pdf) by Robin David, Luigi Coniglio and Mariano Ceccato (NDSS, BAR 2020),
+
+* ["Syntia: Synthesizing the Semantics of Obfuscated Code"](https://synthesis.to/papers/usenix17-syntia.pdf) by Tim Blazytko, Moritz Contag, Cornelius Aschermann and Thorsten Holz (USENIX Security 2017) and
+
+* ["Search-Based Local Blackbox Deobfuscation: Understand, Improve and Mitigate"](https://binsec.github.io/assets/publications/papers/2021-ccs.pdf) by Grégoire Menguy, Sébastien Bardin, Richard Bonichon and Cauim de Souza de Lima (CCS 2021).
 
 
 It can be used in combination with Miasm's symbolic execution engine to simplify complex expressions in obfuscated code or as a standalone tool to play around with MBA simplification.
@@ -22,6 +27,8 @@ simplified: {(-RDX[0:32] + ((RDI[0:32] + RDX[0:32] + RSI[0:32]) << 0x1)) * 0x2 0
 * can simplify whole expressions to constants
 * makes uses of large pre-computed lookup tables (for efficiency)
 * can verify the soundness of simplifications with an SMT solver
+* can learn expressions from input-output behavior
+* supports parallelization
 * fully integrable into Miasm's symbolic execution engine
 
 ## Installation
@@ -61,12 +68,15 @@ To generate an oracle, we need a simplification lookup table (or database) conta
 
 The example database included in [database](/database/) contains all 1,293,020 combinations created by using three variables and the constants 0x0, 0x1 and 0x2 for up to 7 nodes (e.g., `((p0 + p1) * (p2 ^ 0x2))` or `((p0 - p2) << (p1 + p2))`). Larger pre-computed databases can be found [here](https://synthesis.to/code/simplification_databases.7z) (~31GB unzipped). Note that the code for pre-computing expressions is __not__ part of this repository. We plan to release it at some point in the future.
 
+## Stochastic Program Synthesis
+
+As an alternative to pre-computed lookup tables, msynth supports expression simplification via stochastic program synthesis. For a given complex arithmetic expression, msynth can learn a shorter expression that shares the same input-output behavior. For now, it is implemented as a stand-alone component. However, we plan to combine both simplification approaches in future.
+
 ## Example Usage
 
-First, let's generate a synthesis oracle that uses a pre-computed simplification database as input and clusters the contained expressions into equivalence classes.
+First, let's generate a simplification oracle that uses a pre-computed simplification database as input and clusters the contained expressions into equivalence classes.
 
 ```
-
 $ python scripts/gen_oracle.py database/3_variables_constants_7_nodes.txt oracle.pickle
 msynth - INFO: Computing oracle for 30 variables and 50 samples. 
                Using library at 'database/3_variables_constants_7_nodes.txt'
@@ -87,7 +97,18 @@ simplifier = Simplifier(oracle_path)
 simplified = simplifier.simplify(expression)
 ```
 
-It is also possible to combine it with Miasm's symbolic execution engine:
+Alternatively, we can simplify complex expressions via program synthesis and learn expressions with the same input-output behavior:
+
+```python
+from msynth import Synthesizer
+
+# initialize synthesizer
+synthesizer = Synthesizer()
+# simplify via program synthesis
+simplified = synthesizer.simplify(expression)
+```
+
+It is also possible to combine expression simplification with Miasm's symbolic execution engine:
 
 ```
 $ python scripts/symbolic_simplification.py samples/mba_challenge 0x1290 oracle.pickle

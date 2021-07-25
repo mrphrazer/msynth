@@ -2,7 +2,7 @@ import logging
 import time
 from argparse import ArgumentParser
 from pathlib import Path
-from msynth import InputOutputOracle
+from msynth import SimplificationOracle
 
 logger = logging.getLogger("msynth")
 
@@ -18,14 +18,14 @@ def setup_logging() -> None:
 def main(num_variables: int, num_io_samples: int, library_path: Path, oracle_path: Path) -> None:
     start_time = time.time()
     logger.info(f"Computing oracle for {num_variables} variables and {num_io_samples} samples. Using library at '{library_path.as_posix()}'")
-    oracle = InputOutputOracle(num_variables, num_io_samples, library_path)
+    oracle = SimplificationOracle(num_variables, num_io_samples, library_path)
     logger.info(f"Writing oracle to {oracle_path.as_posix()}")
     oracle.dump_to_file(oracle_path)
     logger.info(f"Done in {round(time.time() - start_time, 2)} seconds")
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description="Precompute InputOutputOracle which then can be used to simplify MBA expressions")
+    parser = ArgumentParser(description="Precompute SimplificationOracle which then can be used to simplify MBA expressions")
     parser.add_argument("library_path", type=Path, help="Path to a pre-computed set of expressions that shall be clustered in a oracle")
     parser.add_argument("oracle_path", type=Path, help="Output path to store the calculated oracle")
     parser.add_argument("--variables", dest="num_variables", type=int, default=30, 

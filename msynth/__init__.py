@@ -1,6 +1,7 @@
-from .oracle import InputOutputOracle
-from .simplifier import Simplifier
+from .simplification.oracle import SimplificationOracle
+from .simplification.simplifier import Simplifier
+from .synthesis.synthesizer import Synthesizer
 
 __all__ = [
-    'InputOutputOracle', 'Simplifier'
+    'SimplificationOracle', 'Simplifier', 'Synthesizer'
 ]
