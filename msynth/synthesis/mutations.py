@@ -104,10 +104,10 @@ class Mutator:
         enabled mutations sequentially to the synthesis state.
 
         Args:
-            state (SynthesisState): XXX
+            state (SynthesisState): State to mutate.
 
         Returns:
-            SynthesisState: XXX
+            SynthesisState: Mutated state.
         """
         for _ in range(getrandbits(32) % 5 + 1):
             state = choice(self.mutations)(state)
