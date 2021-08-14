@@ -91,6 +91,10 @@ class Synthesizer:
         expr = reverse_unification(
             state.get_expr_simplified(), unification_dict)
 
+        # upcast expression if necessary
+        if grammar.size > expr.size:
+            expr = expr.zeroExtend(grammar.size)
+
         return expr, score
 
     def synthesize_from_expression_parallel(self, expr: Expr, num_samples: int) -> Tuple[Expr, float]:
