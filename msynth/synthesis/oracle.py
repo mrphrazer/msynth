@@ -31,6 +31,9 @@ class SynthesisOracle:
         Args:
             synthesis_map (Dict[Tuple[Expr, ...], Expr]): Dictionary of input-output behavior.
         """
+        # ensure that synthesis_map contains at least one I/O pair 
+        if len(synthesis_map) == 0:
+            raise AssertionError("SynthesisOracle is empty but should contain at least one I/O pair.")
         self.synthesis_map: Dict[Tuple[Expr, ...], Expr] = synthesis_map
 
     def gen_from_expression(expr: Expr, variables: List[Expr], num_samples: int) -> SynthesisOracle:
