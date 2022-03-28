@@ -250,7 +250,7 @@ class Simplifier:
         if len(expr.graph().nodes()) <= len(simplified.graph().nodes()):
             return False
         # same normalized expression
-        if expr_simp(expr) == expr_simp(simplified):
+        if not simplified.is_int() and expr_simp(expr) == expr_simp(simplified):
             return False
         # SMT solver proves non-equivalence or timeouts
         if self.enforce_equivalence and self.check_semantical_equivalence(expr, simplified) != z3.unsat:
