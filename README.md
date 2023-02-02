@@ -37,7 +37,6 @@ To install msynth follow these steps:
 ```
 git clone https://github.com/mrphrazer/msynth.git
 cd msynth
-git submodule update --init --rebase
 
 # optionally: use a virtual environment
 python -m venv msynth-env
