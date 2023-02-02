@@ -1,0 +1,11 @@
+# Build directory
+/build/*
+# Emacs files
+*~
+# Compiled python files
+*.py[cod]
+# Generated files
+*.egg*
+**.dot
+**.so
+VERSION
