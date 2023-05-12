@@ -739,6 +739,7 @@ class ExampleSymbolExec(Example):
 
 
 testset += ExampleSymbolExec(["single_instr.py"])
+testset += ExampleSymbolExec(["symbol_exec.py", "--steps", Example.get_sample("box_upx.exe")])
 for options, nb_sol, tag in [([], 8, []),
                              (["-i", "--rename-args"], 12, [TAGS["z3"]])]:
     testset += ExampleSymbolExec(["depgraph.py",
@@ -797,6 +798,12 @@ for jitter in ExampleJitter.jitter_engines:
                               Example.get_sample("box_upx.exe")] +
                              ["--jitter", jitter],
                              products=[Example.get_sample("box_upx_exe_unupx.bin")],
+                             tags=tags.get(jitter, []))
+
+    testset += ExampleJitter(["unpack_generic.py",
+                              Example.get_sample("box_upx.exe")] +
+                             ["--jitter", jitter, "-o"],
+                             products=[Example.get_sample("box_upx.exe.dump")],
                              tags=tags.get(jitter, []))
 
     testset += ExampleJitter(["memory_breakpoint.py",
