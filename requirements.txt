@@ -1,7 +1,4 @@
 wheel
 z3-solver
-
-# install submodule miasm
--r ./miasm/requirements.txt
--e ./miasm/
+miasm==0.1.5
 
