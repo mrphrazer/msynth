@@ -216,15 +216,12 @@ class Simplifier:
            In this case, not every variable of the simplification candidate
            can be matched to a terminal expression in the original one.
 
-        2. If the tree depth of the original expression is smaller or equal to
-           the simplified one. In this case, simplification could make
-           expressions even more complex.
 
-        3. If Miasm's expression simplification results in the same expression for
+        2. If Miasm's expression simplification results in the same expression for
            the original and the simplified one. In this case, the lookup in the
            simplification oracle is not required.
 
-        4. If the original expression is semantically equivalent to the simplified one.
+        3. If the original expression is semantically equivalent to the simplified one.
            Since this query is computationally expensive, we, by default, set a small
            timeout and check only if the SMT solver is not able to find a proof for
            inequivalence in the provided time. If the solver was not able to proof 
@@ -243,24 +240,15 @@ class Simplifier:
         """
         # contains placeholder variables
         if any([re.search("^p[0-9]*", v.name) for v in get_unique_variables(simplified)]):
-            logger.debug(
-                f"{expr} <==> {simplified} (incorrect variable replacement)")
-            return False
-        # checks if original is smaller to simplified
-        if len(expr.graph().nodes()) <= len(simplified.graph().nodes()):
             return False
         # same normalized expression
         if not simplified.is_int() and expr_simp(expr) == expr_simp(simplified):
             return False
         # SMT solver proves non-equivalence or timeouts
         if self.enforce_equivalence and self.check_semantical_equivalence(expr, simplified) != z3.unsat:
-            logger.debug(
-                f"{expr} <==> {simplified} (not semantically equivalent)")
             return False
         # SMT solver finds a counter example
         if self.check_semantical_equivalence(expr, simplified) == z3.sat:
-            logger.debug(
-                f"{expr} <==> {simplified} (not semantically equivalent, counterexample found)")
             return False
         return True
 
@@ -293,8 +281,6 @@ class Simplifier:
             # skip simplification if necessary
             if not self._is_suitable_simplification_candidate(expr, simplified):
                 continue
-
-            logger.info(f"simplified subtree: {expr} -> {simplified}")
 
             return True, simplified
 
@@ -337,11 +323,9 @@ class Simplifier:
         # placeholder variable counter
         global_ctr = 0
 
-        logger.info(f"initial ast: {ast}")
-
         # fixpoint iteration
         while True:
-            before = ast.copy()
+            before = ast
 
             # walk over all subtrees
             for subtree in get_subexpressions(ast):

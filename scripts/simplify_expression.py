@@ -1,11 +1,8 @@
-import logging
 import time
 from argparse import ArgumentParser
 from pathlib import Path
 from msynth import Simplifier
 from miasm.expression.expression import Expr, ExprId, ExprInt
-
-logger = logging.getLogger("msynth")
 
 
 def setup_logging() -> None:

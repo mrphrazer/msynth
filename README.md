@@ -124,10 +124,6 @@ $ python scripts/symbolic_simplification.py samples/mba_challenge 0x1290 oracle.
 [snip]
 before: {({RDI[0:32] & RSI[0:32] 0 32, 0x0 32 64} * 0x2 + {RDI[0:32] ^ RSI[0:32] 0 32, 0x0 32 64})[0:32] 0 32, 0x0 32 64}
 
-msynth.simplifier - INFO: initial ast: {({RDI[0:32] & RSI[0:32] 0 32, 0x0 32 64} * 0x2 + {RDI[0:32] ^ RSI[0:32] 0 32, 0x0 32 64})[0:32] 0 32, 0x0 32 64}
-
-msynth.simplifier - INFO: simplified subtree: ({RDI[0:32] & RSI[0:32] 0 32, 0x0 32 64} * 0x2 + {RDI[0:32] ^ RSI[0:32] 0 32, 0x0 32 64})[0:32] -> RDI[0:32] + RSI[0:32]
-
 simplified: {RDI[0:32] + RSI[0:32] 0 32, 0x0 32 64}
 [snip]
 ```
