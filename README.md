@@ -42,16 +42,6 @@ cd msynth
 python -m venv msynth-env
 source msynth-env/bin/activate
 
-# install miasm
-git clone https://github.com/cea-sec/miasm.git
-cd miasm
-git checkout 90dc1671b59077ee27c3d44d9d536d6659eb3bbe
-pip install -r requirements.txt
-pip install .
-
-# go back into msynth directory
-cd ..
-
 # install dependencies
 pip install -r requirements.txt
 
