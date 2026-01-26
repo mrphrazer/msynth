@@ -6,13 +6,12 @@ import warnings
 from pathlib import Path
 from typing import Dict, Iterator, List, Set, Tuple
 
-from miasm.expression.expression import Expr, ExprId, ExprInt, ExprOp, ExprSlice
+from miasm.expression.expression import Expr, ExprInt
 from miasm.expression.simplifications import expr_simp
 
 from msynth.simplification.ast import AbstractSyntaxTreeTranslator
-from msynth.utils.expr_utils import get_unique_variables
+from msynth.utils.expr_utils import get_unique_variables, compile_expr_to_python, parse_expr
 from msynth.utils.sampling import gen_inputs
-from msynth.utils.expr_utils import compile_expr_to_python
 
 
 def calc_hash(s: str) -> str:
@@ -171,7 +170,7 @@ class SimplificationOracle(object):
         # init AST translator
         translator = AbstractSyntaxTreeTranslator()
         # read expression
-        expr = eval(expr_str)
+        expr = parse_expr(expr_str)
         # simplify and transform into abtsract syntax tree
         expr = translator.from_expr(expr_simp(expr))
         # calculate output behavior

@@ -1,6 +1,34 @@
 import re
 from typing import Callable, List, Dict
-from miasm.expression.expression import Expr, ExprCond, ExprId, ExprInt, ExprOp, ExprSlice, ExprCompose
+from miasm.expression.expression import Expr, ExprInt, ExprId, ExprSlice, ExprMem, \
+    ExprCond, ExprCompose, ExprOp, ExprAssign, ExprLoc, LocKey
+
+def parse_expr(expr_str: str) -> Expr:
+    """
+    Parse a miasm expression from its repr string.
+
+    Note: miasm.expression.parser.str_to_expr exists but is slower.
+
+    Args:
+        expr_str: String representation of a miasm expression (e.g. from repr()).
+
+    Returns:
+        Parsed Expr object.
+    """
+    globals = {
+        "ExprId": ExprId,
+        "ExprOp": ExprOp,
+        "ExprInt": ExprInt,
+        "ExprSlice": ExprSlice,
+        "ExprCond": ExprCond,
+        "ExprCompose": ExprCompose,
+        "ExprMem": ExprMem,
+        "ExprAssign": ExprAssign,
+        "ExprLoc": ExprLoc,
+        "LocKey": LocKey,
+    }
+    return eval(expr_str, globals)
+
 
 def gen_unification_dict(expr: Expr) -> Dict[Expr, Expr]:
     """
