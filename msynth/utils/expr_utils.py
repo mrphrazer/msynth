@@ -1,5 +1,6 @@
-from typing import List, Dict
-from miasm.expression.expression import Expr, ExprId
+import re
+from typing import Callable, List, Dict
+from miasm.expression.expression import Expr, ExprCond, ExprId, ExprInt, ExprOp, ExprSlice, ExprCompose
 
 def gen_unification_dict(expr: Expr) -> Dict[Expr, Expr]:
     """
@@ -134,3 +135,166 @@ def get_subexpressions(expr: Expr) -> List[Expr]:
     expr.visit(add_to_list)
 
     return list(reversed(l))
+
+
+def compile_expr_to_python(expr: Expr) -> Callable[[List[int]], int]:
+    """
+    Compile a miasm expression to Python function.
+
+    Instead of walking the expression tree for each evaluation,
+    this compiles to a Python lambda that does direct arithmetic.
+
+    Args:
+        expr: Miasm expression to compile.
+
+    Returns:
+        A function that takes an inputs array and returns the result.
+    """
+    mask = (1 << expr.size) - 1
+
+    def sign_ext(val: str, size: int) -> str:
+        sign_bit = 1 << (size - 1)
+        return f"(({val}^{sign_bit})-{sign_bit})"
+
+    def compile_node(e: Expr) -> str:
+        if isinstance(e, ExprInt):
+            return str(int(e))
+
+        elif isinstance(e, ExprId):
+            name = e.name
+            if name.startswith("p") and name[1:].isdigit():
+                idx = int(name[1:])
+                var_mask = (1 << e.size) - 1 # Mask input to variable's declared size
+                return f"(i[{idx}]&{var_mask})"
+            else:
+                raise ValueError(f"Unknown variable: {name}")
+
+        elif isinstance(e, ExprOp):
+            op = e.op
+            args = e.args
+            op_mask = (1 << e.size) - 1 # Mask for this operation's result size
+
+            if len(args) == 1:
+                a = compile_node(args[0])
+                if op == "-":
+                    return f"((-{a})&{op_mask})"
+                elif op == "parity":
+                    # x86 parity: 1 if even number of bits in low 8 bits, 0 if odd
+                    return f"((bin(({a})&0xFF).count('1')+1)&1)"
+                elif op == "cnttrailzeros":
+                    size = e.size
+                    return f"(({a}&-{a}).bit_length()-1 if {a} else {size})"
+                elif op == "cntleadzeros":
+                    size = e.size
+                    return f"({size}-({a}).bit_length() if {a} else {size})"
+                elif (m := re.fullmatch(r"zeroExt_(\d+)", op)):
+                    target_size = int(m.group(1))
+                    target_mask = (1 << target_size) - 1
+                    return f"(({a})&{target_mask})"
+                elif (m := re.fullmatch(r"signExt_(\d+)", op)):
+                    target_size = int(m.group(1))
+                    source_size = args[0].size
+                    target_mask = (1 << target_size) - 1
+                    sign_bit = 1 << (source_size - 1)
+                    # If sign bit is set, extend with 1s; otherwise keep as-is
+                    extension_bits = ((1 << target_size) - 1) ^ ((1 << source_size) - 1)
+                    return f"((({a})|{extension_bits})&{target_mask} if ({a})&{sign_bit} else ({a})&{target_mask})"
+                else:
+                    raise ValueError(f"Unknown unary op: {op}")
+
+            elif op in ["+", "*", "&", "|", "^"] and len(args) >= 2:
+                compiled_args = [compile_node(arg) for arg in args]
+                py_op = op
+                result = py_op.join(compiled_args)
+                return f"(({result})&{op_mask})"
+
+            elif len(args) == 2:
+                a, b = compile_node(args[0]), compile_node(args[1])
+                if op == "-":
+                    return f"(({a}-{b})&{op_mask})"
+                elif op == ">>":
+                    size = e.size
+                    return f"((({a})>>({b})&{op_mask}) if ({b})<{size} else 0)"
+                elif op == "<<":
+                    size = e.size
+                    return f"((({a})<<({b})&{op_mask}) if ({b})<{size} else 0)"
+                elif op == "a>>":
+                    size = e.size
+                    sign_bit = 1 << (size - 1)
+                    sa = sign_ext(a, size)
+                    # Sign extend, then shift; if shift >= size, result is all 1s or 0s based on sign
+                    return f"(({sa}>>({b})&{op_mask}) if ({b})<{size} else ({op_mask} if ({a})&{sign_bit} else 0))"
+                elif op == "/":
+                    return f"(({a}//{b})&{op_mask} if {b} else 0)"
+                elif op == "%":
+                    return f"(({a}%{b})&{op_mask} if {b} else 0)"
+                elif op == "==":
+                    return f"(1 if {a}=={b} else 0)"
+                elif op == "<u":
+                    return f"(1 if {a}<{b} else 0)"
+                elif op == "<=u":
+                    return f"(1 if {a}<={b} else 0)"
+                elif op == "<s":
+                    size = e.args[0].size
+                    return f"(1 if {sign_ext(a, size)}<{sign_ext(b, size)} else 0)"
+                elif op == "<=s":
+                    size = e.args[0].size
+                    return f"(1 if {sign_ext(a, size)}<={sign_ext(b, size)} else 0)"
+                elif op == "<<<":
+                    # Rotate left: (x << n) | (x >> (size - n))
+                    size = e.size
+                    return f"(((({a})<<(({b})%{size}))|(({a})>>(({size}-({b})%{size})%{size})))&{op_mask})"
+                elif op == ">>>":
+                    # Rotate right: (x >> n) | (x << (size - n))
+                    size = e.size
+                    return f"(((({a})>>(({b})%{size}))|(({a})<<(({size}-({b})%{size})%{size})))&{op_mask})"
+                elif op == "udiv":
+                    return f"(({a}//{b})&{op_mask} if {b} else 0)"
+                elif op == "umod":
+                    return f"(({a}%{b})&{op_mask} if {b} else 0)"
+                elif op == "sdiv":
+                    size = e.args[0].size
+                    sa, sb = sign_ext(a, size), sign_ext(b, size)
+                    return f"(int({sa}/{sb})&{op_mask} if {b} else 0)"
+                elif op == "smod":
+                    # Result has same sign as dividend: a - trunc(a/b) * b
+                    size = e.args[0].size
+                    sa, sb = sign_ext(a, size), sign_ext(b, size)
+                    return f"(({sa}-int({sa}/{sb})*{sb})&{op_mask} if {b} else 0)"
+                elif op == "**":
+                    return f"(({a}**{b})&{op_mask})"
+                else:
+                    raise ValueError(f"Unknown binary op: {op}")
+            else:
+                raise ValueError(f"Unexpected arity {len(args)} for op {op}")
+
+        elif isinstance(e, ExprSlice):
+            arg = compile_node(e.arg)
+            start, stop = e.start, e.stop
+            slice_mask = (1 << (stop - start)) - 1
+            return f"(({arg}>>{start})&{slice_mask})"
+
+        elif isinstance(e, ExprCond):
+            cond = compile_node(e.cond)
+            src1 = compile_node(e.src1)
+            src2 = compile_node(e.src2)
+            return f"({src1} if {cond} else {src2})"
+
+        elif isinstance(e, ExprCompose):
+            result_parts = []
+            offset = 0
+            for arg in e.args:
+                part = compile_node(arg)
+                if offset == 0:
+                    result_parts.append(f"({part})")
+                else:
+                    result_parts.append(f"(({part})<<{offset})")
+                offset += arg.size
+            return "(" + "|".join(result_parts) + ")"
+
+        else:
+            raise ValueError(f"Unknown expression type: {type(e).__name__}")
+
+    code = compile_node(expr)
+    func_code = f"lambda i:({code})&{mask}"
+    return eval(func_code)
