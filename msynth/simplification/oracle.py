@@ -1,9 +1,8 @@
-import functools
 import hashlib
 import multiprocessing
-import os
 import pickle
 import re
+import warnings
 from pathlib import Path
 from typing import Dict, Iterator, List, Set, Tuple
 
@@ -13,6 +12,7 @@ from miasm.expression.simplifications import expr_simp
 from msynth.simplification.ast import AbstractSyntaxTreeTranslator
 from msynth.utils.expr_utils import get_unique_variables
 from msynth.utils.sampling import gen_inputs
+from msynth.utils.expr_utils import compile_expr_to_python
 
 
 def calc_hash(s: str) -> str:
@@ -84,9 +84,13 @@ class SimplificationOracle(object):
         Returns:
             List of ints, representing the expression' output behavior.
         """
-        outputs = [SimplificationOracle.evaluate_expression(expr, input_array)
-                   for input_array in self.inputs]
-        return outputs
+        try:
+            func = compile_expr_to_python(expr)
+            return [func(input_array) for input_array in self.inputs]
+        except ValueError as e:
+            # Fallback to slower tree-walking evaluation for unsupported expression types
+            warnings.warn(f"compile_expr fallback: {e} - consider adding support in compile_expr()")
+            return [self.evaluate_expression(expr, input_array) for input_array in self.inputs]
 
     @staticmethod
     def parse_library(library_path: Path) -> Iterator[str]:
