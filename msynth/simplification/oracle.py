@@ -64,7 +64,19 @@ def compile_expr(expr: Expr) -> Callable[[List[int]], int]:
                     return f"(({a}&-{a}).bit_length()-1 if {a} else {size})"
                 elif op == "cntleadzeros":
                     size = e.size
-                    return f"({size}-{a}.bit_length() if {a} else {size})"
+                    return f"({size}-({a}).bit_length() if {a} else {size})"
+                elif (m := re.fullmatch(r"zeroExt_(\d+)", op)):
+                    target_size = int(m.group(1))
+                    target_mask = (1 << target_size) - 1
+                    return f"(({a})&{target_mask})"
+                elif (m := re.fullmatch(r"signExt_(\d+)", op)):
+                    target_size = int(m.group(1))
+                    source_size = args[0].size
+                    target_mask = (1 << target_size) - 1
+                    sign_bit = 1 << (source_size - 1)
+                    # If sign bit is set, extend with 1s; otherwise keep as-is
+                    extension_bits = ((1 << target_size) - 1) ^ ((1 << source_size) - 1)
+                    return f"((({a})|{extension_bits})&{target_mask} if ({a})&{sign_bit} else ({a})&{target_mask})"
                 else:
                     raise ValueError(f"Unknown unary op: {op}")
 
@@ -121,7 +133,7 @@ def compile_expr(expr: Expr) -> Callable[[List[int]], int]:
                 elif op == "sdiv":
                     size = e.args[0].size
                     sa, sb = sign_ext(a, size), sign_ext(b, size)
-                    return f"((int({sa}//{sb}) if {sb}>0 else -int({sa}//-{sb}) if {sb}<0 else 0)&{op_mask} if {b} else 0)"
+                    return f"(int({sa}/{sb})&{op_mask} if {b} else 0)"
                 elif op == "smod":
                     # Result has same sign as dividend: a - trunc(a/b) * b
                     size = e.args[0].size
