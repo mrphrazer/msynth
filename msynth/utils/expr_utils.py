@@ -255,12 +255,22 @@ def compile_expr_to_python(expr: Expr) -> Callable[[List[int]], int]:
                 elif op == "sdiv":
                     size = e.args[0].size
                     sa, sb = sign_ext(a, size), sign_ext(b, size)
-                    return f"(int({sa}/{sb})&{op_mask} if {b} else 0)"
+                    # Truncate toward zero using integer math to avoid float precision loss.
+                    return (
+                        f"(((abs({sa})//abs({sb}))"
+                        f"*(1 if (({sa})>=0)==(({sb})>=0) else -1))"
+                        f"&{op_mask} if {b} else 0)"
+                    )
                 elif op == "smod":
                     # Result has same sign as dividend: a - trunc(a/b) * b
                     size = e.args[0].size
                     sa, sb = sign_ext(a, size), sign_ext(b, size)
-                    return f"(({sa}-int({sa}/{sb})*{sb})&{op_mask} if {b} else 0)"
+                    return (
+                        f"(({sa}-"
+                        f"((abs({sa})//abs({sb}))"
+                        f"*(1 if (({sa})>=0)==(({sb})>=0) else -1))"
+                        f"*{sb})&{op_mask} if {b} else 0)"
+                    )
                 elif op == "**":
                     return f"(({a}**{b})&{op_mask})"
                 else:
