@@ -3,6 +3,8 @@ import multiprocessing
 import pickle
 import re
 import warnings
+import sqlite3
+import zlib
 from pathlib import Path
 from typing import Dict, Iterator, List, Set, Tuple
 
@@ -138,8 +140,12 @@ class SimplificationOracle(object):
         Returns:
             Iterator over equivalence class members.
         """
-        for member in self.oracle_map[equiv_class]:
-            yield member
+        if hasattr(self, '_runtime_cache') and equiv_class in self._runtime_cache:
+            for member in self._runtime_cache[equiv_class]:
+                yield member
+        else:
+            for member in self.oracle_map[equiv_class]:
+                yield member
 
     def contains_equiv_class(self, equiv_class: str) -> bool:
         """
@@ -151,7 +157,25 @@ class SimplificationOracle(object):
         Returns:
             True if equiv class in oracle, False otherwise
         """
+        if hasattr(self, '_runtime_cache') and equiv_class in self._runtime_cache:
+            return True
         return equiv_class in self.oracle_map
+
+    def set_equiv_class(self, equiv_class: str, members: List[Expr]) -> None:
+        """
+        Sets the members for an equivalence class.
+
+        For lazy-loaded oracles, this writes to the runtime cache.
+        For in-memory oracles, this writes directly to oracle_map.
+
+        Args:
+            equiv_class: Equivalence class as string.
+            members: List of expressions for this equivalence class.
+        """
+        if hasattr(self, '_runtime_cache'):
+            self._runtime_cache[equiv_class] = members
+        else:
+            self.oracle_map[equiv_class] = members
 
     def _expr_str_to_equiv_class(self, expr_str: str) -> Tuple[str, Expr]:
         """
@@ -260,26 +284,146 @@ class SimplificationOracle(object):
         """
         Load a pre-computed SimplificationOracle from a given file.
 
+        Supports both pickle format and sqlite format.
+        For sqlite format, equivalence classes are queried and loaded lazily
+        rather than all at once.
+
         Args:
             file_path: Path to pre-computed SimplificationOracle file.
 
         Returns:
             Deserialized SimplificationOracle.
         """
-        with open(file_path, 'rb') as f:
-            oracle: SimplificationOracle = pickle.load(f)
-        assert isinstance(oracle, SimplificationOracle), f"Expected SimplificationOracle, found {type(oracle)}"
+        try:
+            return SimplificationOracle._load_from_sqlite(file_path)
+        except sqlite3.DatabaseError:
+            # Not sqlite, try pickle
+            with open(file_path, 'rb') as f:
+                oracle: SimplificationOracle = pickle.load(f)
+            assert isinstance(oracle, SimplificationOracle), f"Expected SimplificationOracle, found {type(oracle)}"
+            return oracle
+
+    @staticmethod
+    def _load_from_sqlite(file_path: Path) -> 'SimplificationOracle':
+        """Load oracle from sqlite format with lazy loading."""
+        conn = sqlite3.connect(file_path)
+
+        # Load metadata
+        cur = conn.execute("SELECT key, value FROM metadata")
+        meta = dict(cur.fetchall())
+
+        oracle = SimplificationOracle.__new__(SimplificationOracle)
+        oracle.num_variables = meta['num_variables']
+        oracle.num_samples = meta['num_samples']
+        oracle.inputs = pickle.loads(meta['inputs'])
+        oracle._conn = conn
+        oracle.oracle_map = SqliteOracleMap(conn)
+        oracle._runtime_cache = {}
         return oracle
 
-    def dump_to_file(self, file_path: Path) -> None:
+    def dump_to_file(self, file_path: Path, use_sqlite: bool = False) -> None:
         """
-        Stores an SimplificationOracle instance to a file.
+        Stores a SimplificationOracle instance to a file.
 
         Args:
             file_path: File path to store object instance.
+            use_sqlite: If True, use sqlite format for lazy loading support.
+                        If False (default), use pickle format.
 
         Returns:
             None
         """
-        with open(file_path, 'wb') as f:
-            pickle.dump(self, f)
+        if use_sqlite:
+            if Path(file_path).exists():
+                # Remove existing to rebuild from scratch
+                Path(file_path).unlink()
+
+            conn = sqlite3.connect(file_path)
+            conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value BLOB)")
+            conn.execute("CREATE TABLE equiv_classes (equiv_class BLOB PRIMARY KEY, members BLOB)")
+
+            conn.execute("INSERT INTO metadata VALUES (?, ?)",
+                         ('num_variables', self.num_variables))
+            conn.execute("INSERT INTO metadata VALUES (?, ?)",
+                         ('num_samples', self.num_samples))
+            conn.execute("INSERT INTO metadata VALUES (?, ?)",
+                         ('inputs', pickle.dumps(self.inputs)))
+
+            for k, v in self.oracle_map.items():
+                conn.execute("INSERT INTO equiv_classes VALUES (?, ?)",
+                             (bytes.fromhex(k), SqliteOracleMap._exprs_to_bytes(v)))
+            conn.commit()
+            conn.close()
+        else:
+            with open(file_path, 'wb') as f:
+                pickle.dump(self, f)
+
+    def close(self) -> None:
+        """
+        Close the underlying sqlite connection if open.
+        """
+        if hasattr(self, '_conn') and self._conn:
+            self._conn.close()
+            self._conn = None
+
+
+class SqliteOracleMap:
+    """Dict-like lazy-loading proxy for sqlite oracle storage.
+
+    Key hashes are stored as 20 byte binary BLOBs.
+    Members are stored as zlib-compressed newline-separated repr strings.
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    @staticmethod
+    def _to_bin(hex_key: str) -> bytes:
+        """Convert hex string key to binary for storage."""
+        return bytes.fromhex(hex_key)
+
+    @staticmethod
+    def _to_hex(bin_key: bytes) -> str:
+        """Convert binary key back to hex string."""
+        return bin_key.hex()
+
+    @staticmethod
+    def _exprs_to_bytes(exprs: List[Expr]) -> bytes:
+        """Serialize list of expressions as compressed repr strings."""
+        text = '\n'.join(repr(e) for e in exprs)
+        return zlib.compress(text.encode(), level=9)
+
+    @staticmethod
+    def _bytes_to_exprs(data: bytes) -> List[Expr]:
+        """Deserialize compressed repr strings back to expressions."""
+        text = zlib.decompress(data).decode()
+        return [parse_expr(line) for line in text.split('\n') if line]
+
+    def __contains__(self, key: str) -> bool:
+        cur = self._conn.execute(
+            "SELECT 1 FROM equiv_classes WHERE equiv_class = ?",
+            (self._to_bin(key),))
+        return cur.fetchone() is not None
+
+    def __getitem__(self, key: str) -> List[Expr]:
+        cur = self._conn.execute(
+            "SELECT members FROM equiv_classes WHERE equiv_class = ?",
+            (self._to_bin(key),))
+        row = cur.fetchone()
+        if row is None:
+            raise KeyError(key)
+        return self._bytes_to_exprs(row[0])
+
+    def keys(self) -> Iterator[str]:
+        cur = self._conn.execute("SELECT equiv_class FROM equiv_classes")
+        return (self._to_hex(row[0]) for row in cur)
+
+    def items(self) -> Iterator[Tuple[str, List[Expr]]]:
+        cur = self._conn.execute("SELECT equiv_class, members FROM equiv_classes")
+        for row in cur:
+            yield self._to_hex(row[0]), self._bytes_to_exprs(row[1])
+
+    def __len__(self) -> int:
+        cur = self._conn.execute("SELECT COUNT(*) FROM equiv_classes")
+        return cur.fetchone()[0]
+
