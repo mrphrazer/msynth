@@ -485,3 +485,11 @@ def test_compile_randomized_ext_ops() -> None:
         for expr in [zero_expr, sign_expr]:
             func = compile_expr_to_python(expr)
             assert func([0]) == miasm_eval(expr, [0])
+
+def test_compile_shared_subexpression_or_chain() -> None:
+    expr = ExprId("p0", 32)
+    for _ in range(25):
+        expr = ExprOp("|", expr, expr)
+    func = compile_expr_to_python(expr)
+    inputs = [0x12345678]
+    assert func(inputs) == miasm_eval(expr, inputs)

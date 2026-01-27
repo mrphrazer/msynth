@@ -152,11 +152,32 @@ def compile_expr_to_python(expr: Expr) -> Callable[[List[int]], int]:
     """
     mask = (1 << expr.size) - 1
 
+    var_map: Dict[int, str] = {}  # expr id -> variable name
+    lines: List[str] = []
+
     def sign_ext(val: str, size: int) -> str:
         sign_bit = 1 << (size - 1)
         return f"(({val}^{sign_bit})-{sign_bit})"
 
     def compile_node(e: Expr) -> str:
+        eid = id(e)
+
+        # check if already assigned to variable
+        if eid in var_map:
+            return var_map[eid]
+
+        code = compile_node_inner(e)
+
+        # if non-trivial, assign to a variable to avoid evaluating more than once
+        if not isinstance(e, (ExprInt, ExprId)):
+            var_name = f"_v{len(lines)}"
+            lines.append(f"{var_name}={code}")
+            var_map[eid] = var_name
+            return var_name
+
+        return code
+
+    def compile_node_inner(e: Expr) -> str:
         if isinstance(e, ExprInt):
             return str(int(e))
 
@@ -305,6 +326,12 @@ def compile_expr_to_python(expr: Expr) -> Callable[[List[int]], int]:
         else:
             raise ValueError(f"Unknown expression type: {type(e).__name__}")
 
-    code = compile_node(expr)
-    func_code = f"lambda i:({code})&{mask}"
-    return eval(func_code)
+    # build root expression
+    result_code = compile_node(expr)
+    lines.append(f"return ({result_code})&{mask}")
+
+    # build function src and eval
+    func_code = f"def _f(i):{';'.join(lines)}"
+    local_ns = {}
+    exec(func_code, {}, local_ns)
+    return local_ns["_f"]
