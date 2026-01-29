@@ -3,8 +3,6 @@ import multiprocessing
 import pickle
 import re
 import warnings
-import sqlite3
-import zlib
 from pathlib import Path
 from typing import Dict, Iterator, List, Set, Tuple
 
@@ -14,6 +12,7 @@ from miasm.expression.simplifications import expr_simp
 from msynth.simplification.ast import AbstractSyntaxTreeTranslator
 from msynth.utils.expr_utils import get_unique_variables, compile_expr_to_python, parse_expr
 from msynth.utils.sampling import gen_inputs
+from msynth.utils.sqlite import NotSqliteOracleError, dump_sqlite_oracle_data, load_sqlite_oracle_data
 
 
 def calc_hash(s: str) -> str:
@@ -288,6 +287,12 @@ class SimplificationOracle(object):
         For sqlite format, equivalence classes are queried and loaded lazily
         rather than all at once.
 
+        For sqlite oracles, release database connection when finished by
+        calling close() or using context manager:
+
+            with SimplificationOracle.load_from_file(path) as oracle:
+                ...
+
         Args:
             file_path: Path to pre-computed SimplificationOracle file.
 
@@ -295,31 +300,21 @@ class SimplificationOracle(object):
             Deserialized SimplificationOracle.
         """
         try:
-            return SimplificationOracle._load_from_sqlite(file_path)
-        except sqlite3.DatabaseError:
+            meta, conn, oracle_map = load_sqlite_oracle_data(file_path)
+            oracle = SimplificationOracle.__new__(SimplificationOracle)
+            oracle.num_variables = meta['num_variables']
+            oracle.num_samples = meta['num_samples']
+            oracle.inputs = meta['inputs']
+            oracle._conn = conn
+            oracle.oracle_map = oracle_map
+            oracle._runtime_cache = {}
+            return oracle
+        except NotSqliteOracleError:
             # Not sqlite, try pickle
             with open(file_path, 'rb') as f:
-                oracle: SimplificationOracle = pickle.load(f)
+                oracle = pickle.load(f)
             assert isinstance(oracle, SimplificationOracle), f"Expected SimplificationOracle, found {type(oracle)}"
             return oracle
-
-    @staticmethod
-    def _load_from_sqlite(file_path: Path) -> 'SimplificationOracle':
-        """Load oracle from sqlite format with lazy loading."""
-        conn = sqlite3.connect(file_path)
-
-        # Load metadata
-        cur = conn.execute("SELECT key, value FROM metadata")
-        meta = dict(cur.fetchall())
-
-        oracle = SimplificationOracle.__new__(SimplificationOracle)
-        oracle.num_variables = meta['num_variables']
-        oracle.num_samples = meta['num_samples']
-        oracle.inputs = pickle.loads(meta['inputs'])
-        oracle._conn = conn
-        oracle.oracle_map = SqliteOracleMap(conn)
-        oracle._runtime_cache = {}
-        return oracle
 
     def dump_to_file(self, file_path: Path, use_sqlite: bool = False) -> None:
         """
@@ -334,96 +329,26 @@ class SimplificationOracle(object):
             None
         """
         if use_sqlite:
-            if Path(file_path).exists():
-                # Remove existing to rebuild from scratch
-                Path(file_path).unlink()
-
-            conn = sqlite3.connect(file_path)
-            conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value BLOB)")
-            conn.execute("CREATE TABLE equiv_classes (equiv_class BLOB PRIMARY KEY, members BLOB)")
-
-            conn.execute("INSERT INTO metadata VALUES (?, ?)",
-                         ('num_variables', self.num_variables))
-            conn.execute("INSERT INTO metadata VALUES (?, ?)",
-                         ('num_samples', self.num_samples))
-            conn.execute("INSERT INTO metadata VALUES (?, ?)",
-                         ('inputs', pickle.dumps(self.inputs)))
-
-            for k, v in self.oracle_map.items():
-                conn.execute("INSERT INTO equiv_classes VALUES (?, ?)",
-                             (bytes.fromhex(k), SqliteOracleMap._exprs_to_bytes(v)))
-            conn.commit()
-            conn.close()
+            dump_sqlite_oracle_data(file_path, self.num_variables, self.num_samples, self.inputs, self.oracle_map)
         else:
             with open(file_path, 'wb') as f:
                 pickle.dump(self, f)
 
     def close(self) -> None:
         """
-        Close the underlying sqlite connection if open.
+        Close any resources held by this oracle.
+
+        For sqlite-backed oracles, this closes the database connection.
+        For pickle-loaded oracles, this is a no-op.
         """
         if hasattr(self, '_conn') and self._conn:
             self._conn.close()
             self._conn = None
 
+    def __enter__(self) -> 'SimplificationOracle':
+        """Enter context manager."""
+        return self
 
-class SqliteOracleMap:
-    """Dict-like lazy-loading proxy for sqlite oracle storage.
-
-    Key hashes are stored as 20 byte binary BLOBs.
-    Members are stored as zlib-compressed newline-separated repr strings.
-    """
-
-    def __init__(self, conn: sqlite3.Connection):
-        self._conn = conn
-
-    @staticmethod
-    def _to_bin(hex_key: str) -> bytes:
-        """Convert hex string key to binary for storage."""
-        return bytes.fromhex(hex_key)
-
-    @staticmethod
-    def _to_hex(bin_key: bytes) -> str:
-        """Convert binary key back to hex string."""
-        return bin_key.hex()
-
-    @staticmethod
-    def _exprs_to_bytes(exprs: List[Expr]) -> bytes:
-        """Serialize list of expressions as compressed repr strings."""
-        text = '\n'.join(repr(e) for e in exprs)
-        return zlib.compress(text.encode(), level=9)
-
-    @staticmethod
-    def _bytes_to_exprs(data: bytes) -> List[Expr]:
-        """Deserialize compressed repr strings back to expressions."""
-        text = zlib.decompress(data).decode()
-        return [parse_expr(line) for line in text.split('\n') if line]
-
-    def __contains__(self, key: str) -> bool:
-        cur = self._conn.execute(
-            "SELECT 1 FROM equiv_classes WHERE equiv_class = ?",
-            (self._to_bin(key),))
-        return cur.fetchone() is not None
-
-    def __getitem__(self, key: str) -> List[Expr]:
-        cur = self._conn.execute(
-            "SELECT members FROM equiv_classes WHERE equiv_class = ?",
-            (self._to_bin(key),))
-        row = cur.fetchone()
-        if row is None:
-            raise KeyError(key)
-        return self._bytes_to_exprs(row[0])
-
-    def keys(self) -> Iterator[str]:
-        cur = self._conn.execute("SELECT equiv_class FROM equiv_classes")
-        return (self._to_hex(row[0]) for row in cur)
-
-    def items(self) -> Iterator[Tuple[str, List[Expr]]]:
-        cur = self._conn.execute("SELECT equiv_class, members FROM equiv_classes")
-        for row in cur:
-            yield self._to_hex(row[0]), self._bytes_to_exprs(row[1])
-
-    def __len__(self) -> int:
-        cur = self._conn.execute("SELECT COUNT(*) FROM equiv_classes")
-        return cur.fetchone()[0]
-
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit context manager, closing any resources."""
+        self.close()
