@@ -44,3 +44,19 @@ def test_oracle_roundtrip(tmp_path: Path) -> None:
     assert loaded.num_variables == oracle.num_variables
     assert loaded.num_samples == oracle.num_samples
     assert loaded.oracle_map.keys() == oracle.oracle_map.keys()
+
+
+def test_oracle_sqlite_roundtrip(tmp_path: Path) -> None:
+    library = write_library(tmp_path)
+    oracle = SimplificationOracle(num_variables=2, num_samples=5, library_path=library)
+    out_path = tmp_path / "oracle.db"
+    oracle.dump_to_file(out_path, use_sqlite=True)
+
+    with SimplificationOracle.load_from_file(out_path) as loaded:
+        assert loaded.num_variables == oracle.num_variables
+        assert loaded.num_samples == oracle.num_samples
+        for key in oracle.oracle_map.keys():
+            assert loaded.contains_equiv_class(key)
+            original_members = [e for e in oracle.oracle_map[key]]
+            loaded_members = [e for e in loaded.oracle_map[key]]
+            assert loaded_members == original_members

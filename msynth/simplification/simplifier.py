@@ -155,8 +155,8 @@ class Simplifier:
 
         # if all evaluate to same constant, add/replace equiv class with constant
         if len(set(outputs)) == 1:
-            self.oracle.oracle_map[equiv_class] = [ExprInt(
-                outputs[0], expr.size)]
+            self.oracle.set_equiv_class(equiv_class, [ExprInt(
+                outputs[0], expr.size)])
 
         return equiv_class
 

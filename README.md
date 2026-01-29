@@ -85,6 +85,12 @@ msynth - INFO: Done in 632.84 seconds
 
 Depending on the size of the pre-computed simplification database, this may take a few minutes or hours, depending on your computer. Alternatively, you can use the pre-computed [oracle.pickle](/oracle.pickle).
 
+Optionally, the `--sqlite` flag can be used to generate the oracle in SQLite format, which enables lazy loading and significantly faster startup times:
+
+```
+$ python scripts/gen_oracle.py database/3_variables_constants_7_nodes.txt oracle.db --sqlite
+```
+
 Afterward, the serialized oracle can be used to simplify complex expressions:
 
 ```python

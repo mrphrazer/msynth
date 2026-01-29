@@ -6,13 +6,13 @@ import warnings
 from pathlib import Path
 from typing import Dict, Iterator, List, Set, Tuple
 
-from miasm.expression.expression import Expr, ExprId, ExprInt, ExprOp, ExprSlice
+from miasm.expression.expression import Expr, ExprInt
 from miasm.expression.simplifications import expr_simp
 
 from msynth.simplification.ast import AbstractSyntaxTreeTranslator
-from msynth.utils.expr_utils import get_unique_variables
+from msynth.utils.expr_utils import get_unique_variables, compile_expr_to_python, parse_expr
 from msynth.utils.sampling import gen_inputs
-from msynth.utils.expr_utils import compile_expr_to_python
+from msynth.utils.sqlite import NotSqliteOracleError, dump_sqlite_oracle_data, load_sqlite_oracle_data
 
 
 def calc_hash(s: str) -> str:
@@ -139,8 +139,12 @@ class SimplificationOracle(object):
         Returns:
             Iterator over equivalence class members.
         """
-        for member in self.oracle_map[equiv_class]:
-            yield member
+        if hasattr(self, '_runtime_cache') and equiv_class in self._runtime_cache:
+            for member in self._runtime_cache[equiv_class]:
+                yield member
+        else:
+            for member in self.oracle_map[equiv_class]:
+                yield member
 
     def contains_equiv_class(self, equiv_class: str) -> bool:
         """
@@ -152,7 +156,25 @@ class SimplificationOracle(object):
         Returns:
             True if equiv class in oracle, False otherwise
         """
+        if hasattr(self, '_runtime_cache') and equiv_class in self._runtime_cache:
+            return True
         return equiv_class in self.oracle_map
+
+    def set_equiv_class(self, equiv_class: str, members: List[Expr]) -> None:
+        """
+        Sets the members for an equivalence class.
+
+        For lazy-loaded oracles, this writes to the runtime cache.
+        For in-memory oracles, this writes directly to oracle_map.
+
+        Args:
+            equiv_class: Equivalence class as string.
+            members: List of expressions for this equivalence class.
+        """
+        if hasattr(self, '_runtime_cache'):
+            self._runtime_cache[equiv_class] = members
+        else:
+            self.oracle_map[equiv_class] = members
 
     def _expr_str_to_equiv_class(self, expr_str: str) -> Tuple[str, Expr]:
         """
@@ -171,7 +193,7 @@ class SimplificationOracle(object):
         # init AST translator
         translator = AbstractSyntaxTreeTranslator()
         # read expression
-        expr = eval(expr_str)
+        expr = parse_expr(expr_str)
         # simplify and transform into abtsract syntax tree
         expr = translator.from_expr(expr_simp(expr))
         # calculate output behavior
@@ -261,26 +283,72 @@ class SimplificationOracle(object):
         """
         Load a pre-computed SimplificationOracle from a given file.
 
+        Supports both pickle format and sqlite format.
+        For sqlite format, equivalence classes are queried and loaded lazily
+        rather than all at once.
+
+        For sqlite oracles, release database connection when finished by
+        calling close() or using context manager:
+
+            with SimplificationOracle.load_from_file(path) as oracle:
+                ...
+
         Args:
             file_path: Path to pre-computed SimplificationOracle file.
 
         Returns:
             Deserialized SimplificationOracle.
         """
-        with open(file_path, 'rb') as f:
-            oracle: SimplificationOracle = pickle.load(f)
-        assert isinstance(oracle, SimplificationOracle), f"Expected SimplificationOracle, found {type(oracle)}"
-        return oracle
+        try:
+            meta, conn, oracle_map = load_sqlite_oracle_data(file_path)
+            oracle = SimplificationOracle.__new__(SimplificationOracle)
+            oracle.num_variables = meta['num_variables']
+            oracle.num_samples = meta['num_samples']
+            oracle.inputs = meta['inputs']
+            oracle._conn = conn
+            oracle.oracle_map = oracle_map
+            oracle._runtime_cache = {}
+            return oracle
+        except NotSqliteOracleError:
+            # Not sqlite, try pickle
+            with open(file_path, 'rb') as f:
+                oracle = pickle.load(f)
+            assert isinstance(oracle, SimplificationOracle), f"Expected SimplificationOracle, found {type(oracle)}"
+            return oracle
 
-    def dump_to_file(self, file_path: Path) -> None:
+    def dump_to_file(self, file_path: Path, use_sqlite: bool = False) -> None:
         """
-        Stores an SimplificationOracle instance to a file.
+        Stores a SimplificationOracle instance to a file.
 
         Args:
             file_path: File path to store object instance.
+            use_sqlite: If True, use sqlite format for lazy loading support.
+                        If False (default), use pickle format.
 
         Returns:
             None
         """
-        with open(file_path, 'wb') as f:
-            pickle.dump(self, f)
+        if use_sqlite:
+            dump_sqlite_oracle_data(file_path, self.num_variables, self.num_samples, self.inputs, self.oracle_map)
+        else:
+            with open(file_path, 'wb') as f:
+                pickle.dump(self, f)
+
+    def close(self) -> None:
+        """
+        Close any resources held by this oracle.
+
+        For sqlite-backed oracles, this closes the database connection.
+        For pickle-loaded oracles, this is a no-op.
+        """
+        if hasattr(self, '_conn') and self._conn:
+            self._conn.close()
+            self._conn = None
+
+    def __enter__(self) -> 'SimplificationOracle':
+        """Enter context manager."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Exit context manager, closing any resources."""
+        self.close()
