@@ -37,6 +37,11 @@ class SynthesisOracle:
                 "SynthesisOracle is empty but should contain at least one I/O pair."
             )
         self.synthesis_map: Dict[Tuple[Expr, ...], Expr] = synthesis_map
+        # cache integer samples for faster scoring
+        self._samples_int: List[Tuple[Tuple[int, ...], int]] = [
+            (tuple(int(v) for v in inputs), int(output))
+            for inputs, output in synthesis_map.items()
+        ]
 
     def gen_from_expression(expr: Expr, variables: List[Expr], num_samples: int) -> SynthesisOracle:
         """
