@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple
 from miasm.expression.expression import Expr
 from miasm.expression.simplifications import expr_simp
 from msynth.synthesis.oracle import SynthesisOracle
-from msynth.utils.expr_utils import get_unique_variables
+from msynth.utils.expr_utils import compile_expr_to_python, get_unique_variables
 
 
 class SynthesisState:
@@ -93,13 +93,29 @@ class SynthesisState:
         """
         # apply current replacement dictionary to speed up expression evaluation
         self._apply_replacements()
-        # sum the scores
-        return sum([
-            # calculate score for input array
-            log2(1 + abs(int(self._evaluate(inputs, variables)) - int(oracle_output)))
-            # walk over all input arrays in the oracle
-            for inputs, oracle_output in oracle.synthesis_map.items()
-        ])
+
+        try:
+            # use compiled evaluation when possible; fallback preserves correctness for unsupported ops.
+            compiled = compile_expr_to_python(self._expr)
+            var_indices = [int(v.name[1:]) for v in variables]
+            max_idx = max(var_indices, default=-1)
+
+            def eval_compiled(inputs: Tuple[Expr, ...]) -> int:
+                input_list = [0] * (max_idx + 1)
+                for idx, expr_val in zip(var_indices, inputs):
+                    input_list[idx] = int(expr_val)
+                return compiled(input_list)
+
+            return sum(
+                log2(1 + abs(eval_compiled(inputs) - int(oracle_output)))
+                for inputs, oracle_output in oracle.synthesis_map.items()
+            )
+        except ValueError:
+            # fall back to tree-walking evaluation for unsupported expression types
+            return sum(
+                log2(1 + abs(int(self._evaluate(inputs, variables)) - int(oracle_output)))
+                for inputs, oracle_output in oracle.synthesis_map.items()
+            )
 
     def _evaluate(self, inputs: Tuple[Expr, ...], variables: List[Expr]) -> Expr:
         """
