@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from math import log2
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple
 
 from miasm.expression.expression import Expr
 from miasm.expression.simplifications import expr_simp
 from msynth.synthesis.oracle import SynthesisOracle
-from msynth.utils.expr_utils import get_unique_variables
+from msynth.utils.expr_utils import compile_expr_to_python, get_unique_variables
 
 
 class SynthesisState:
@@ -49,6 +49,10 @@ class SynthesisState:
         self.expr_ast: Expr = expr
         self._expr: Expr = expr.replace_expr(replacements)
         self.replacements: Dict[Expr, Expr] = replacements
+        # cache compiled evaluation for current _expr; invalidate by key when _expr changes
+        self._compiled_key: str | None = None
+        self._compiled_func: Callable[[List[int]], int] | None = None
+        self._compiled_fail_key: str | None = None
 
     def clone(self) -> SynthesisState:
         """
@@ -93,13 +97,59 @@ class SynthesisState:
         """
         # apply current replacement dictionary to speed up expression evaluation
         self._apply_replacements()
-        # sum the scores
-        return sum([
-            # calculate score for input array
+
+        # use compiled evaluation when possible; fallback preserves correctness for unsupported ops.
+        compiled: Callable[[List[int]], int] | None = None
+        compiled_key: str = repr(self._expr)
+        if compiled_key == self._compiled_key:
+            # hit cache for identical expression
+            compiled = self._compiled_func
+        elif compiled_key != self._compiled_fail_key:
+            # try to compile once per unique expression
+            try:
+                compiled = compile_expr_to_python(self._expr)
+                self._compiled_key = compiled_key
+                self._compiled_func = compiled
+            except ValueError:
+                # remember unsupported expressions to skip repeat exceptions
+                self._compiled_fail_key = compiled_key
+
+        if compiled is not None:
+            # map variables to their p# indices for input alignment
+            var_indices: List[int] = [int(v.name[1:]) for v in variables]
+            max_idx: int = max(var_indices, default=-1)
+            dense_indices: bool = var_indices == list(range(len(var_indices)))
+
+            def eval_compiled(inputs: Tuple[int, ...]) -> int:
+                if dense_indices:
+                    # fast path: inputs already ordered p0..pN
+                    return compiled(inputs)
+                # sparse p# indices: expand into a dense list
+                input_list = [0] * (max_idx + 1)
+                for idx, expr_val in zip(var_indices, inputs):
+                    input_list[idx] = expr_val
+                return compiled(input_list)
+
+            # use cached int samples from the oracle when available
+            samples_int: List[Tuple[Tuple[int, ...], int]] | None = getattr(oracle, "_samples_int", None)
+            if samples_int is None:
+                # build the cache lazily for legacy oracles
+                samples_int = [
+                    (tuple(int(v) for v in inputs), int(output))
+                    for inputs, output in oracle.synthesis_map.items()
+                ]
+                oracle._samples_int = samples_int
+
+            return sum(
+                log2(1 + abs(eval_compiled(inputs) - oracle_output))
+                for inputs, oracle_output in samples_int
+            )
+
+        # fall back to tree-walking evaluation for unsupported expression types
+        return sum(
             log2(1 + abs(int(self._evaluate(inputs, variables)) - int(oracle_output)))
-            # walk over all input arrays in the oracle
             for inputs, oracle_output in oracle.synthesis_map.items()
-        ])
+        )
 
     def _evaluate(self, inputs: Tuple[Expr, ...], variables: List[Expr]) -> Expr:
         """
