@@ -4,13 +4,13 @@ import pickle
 import pytest
 from pathlib import Path
 
-from miasm.expression.expression import ExprId, ExprInt, ExprOp
+from miasm.expression.expression import ExprId, ExprOp
 
 from msynth.simplification.oracle import SimplificationOracle
 
 
 def write_library(tmp_path: Path) -> Path:
-    # Keep expressions simple and valid for eval() in oracle module scope.
+    # keep expressions simple and valid for eval() in oracle module scope.
     lines = [
         "ExprOp('+', ExprId('p0', 8), ExprId('p1', 8))",
         "ExprOp('^', ExprId('p0', 8), ExprId('p1', 8))",
@@ -24,7 +24,7 @@ def write_library(tmp_path: Path) -> Path:
 def test_oracle_map_builds_and_skips_ints(tmp_path: Path) -> None:
     library = write_library(tmp_path)
     oracle = SimplificationOracle(num_variables=2, num_samples=5, library_path=library)
-    # Only non-constant expressions should be included.
+    # only non-constant expressions should be included.
     assert sum(len(v) for v in oracle.oracle_map.values()) == 2
 
 

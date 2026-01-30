@@ -2,7 +2,6 @@ import hashlib
 import multiprocessing
 import pickle
 import re
-import warnings
 from pathlib import Path
 from typing import Dict, Iterator, List, Set, Tuple
 
@@ -10,9 +9,17 @@ from miasm.expression.expression import Expr, ExprInt
 from miasm.expression.simplifications import expr_simp
 
 from msynth.simplification.ast import AbstractSyntaxTreeTranslator
-from msynth.utils.expr_utils import get_unique_variables, compile_expr_to_python, parse_expr
+from msynth.utils.expr_utils import (
+    get_unique_variables,
+    compile_expr_to_python,
+    parse_expr,
+)
 from msynth.utils.sampling import gen_inputs
-from msynth.utils.sqlite import NotSqliteOracleError, dump_sqlite_oracle_data, load_sqlite_oracle_data
+from msynth.utils.sqlite import (
+    NotSqliteOracleError,
+    dump_sqlite_oracle_data,
+    load_sqlite_oracle_data,
+)
 
 
 def calc_hash(s: str) -> str:
@@ -25,7 +32,7 @@ def calc_hash(s: str) -> str:
     Returns:
         SHA1 of input as string
     """
-    return hashlib.sha1(s.encode('ascii')).hexdigest()
+    return hashlib.sha1(s.encode("ascii")).hexdigest()
 
 
 class SimplificationOracle(object):
@@ -42,8 +49,8 @@ class SimplificationOracle(object):
     (a set of expressions that share the same output behavior for a
     set of inputs).
 
-    To build such a mapping for a pre-computed set of formulas 
-    (a so-called library), it takes a path to a library file as input 
+    To build such a mapping for a pre-computed set of formulas
+    (a so-called library), it takes a path to a library file as input
     and clusters the individual expressions into equivalence classes.
     Afterward, they can be stored in a file.
 
@@ -87,10 +94,12 @@ class SimplificationOracle(object):
         try:
             func = compile_expr_to_python(expr)
             return [func(input_array) for input_array in self.inputs]
-        except ValueError as e:
+        except ValueError:
             # Fallback to slower tree-walking evaluation for unsupported expression types
-            warnings.warn(f"compile_expr fallback: {e} - consider adding support in compile_expr()")
-            return [self.evaluate_expression(expr, input_array) for input_array in self.inputs]
+            return [
+                self.evaluate_expression(expr, input_array)
+                for input_array in self.inputs
+            ]
 
     @staticmethod
     def parse_library(library_path: Path) -> Iterator[str]:
@@ -107,7 +116,7 @@ class SimplificationOracle(object):
         yield from library_path.read_text().splitlines()
 
     def determine_equiv_class(self, expr: Expr, outputs: List[int]) -> str:
-        """ 
+        """
         Determines an expressions' equivalence class.
 
         The equivalence is a cryptographic string over
@@ -131,7 +140,7 @@ class SimplificationOracle(object):
 
     def get_equiv_class_members(self, equiv_class: str) -> Iterator[Expr]:
         """
-        Iterates over all members for a given equivalence class. 
+        Iterates over all members for a given equivalence class.
 
         Args:
             equiv_class: Equivalence class as string.
@@ -139,7 +148,7 @@ class SimplificationOracle(object):
         Returns:
             Iterator over equivalence class members.
         """
-        if hasattr(self, '_runtime_cache') and equiv_class in self._runtime_cache:
+        if hasattr(self, "_runtime_cache") and equiv_class in self._runtime_cache:
             for member in self._runtime_cache[equiv_class]:
                 yield member
         else:
@@ -156,7 +165,7 @@ class SimplificationOracle(object):
         Returns:
             True if equiv class in oracle, False otherwise
         """
-        if hasattr(self, '_runtime_cache') and equiv_class in self._runtime_cache:
+        if hasattr(self, "_runtime_cache") and equiv_class in self._runtime_cache:
             return True
         return equiv_class in self.oracle_map
 
@@ -171,14 +180,14 @@ class SimplificationOracle(object):
             equiv_class: Equivalence class as string.
             members: List of expressions for this equivalence class.
         """
-        if hasattr(self, '_runtime_cache'):
+        if hasattr(self, "_runtime_cache"):
             self._runtime_cache[equiv_class] = members
         else:
             self.oracle_map[equiv_class] = members
 
     def _expr_str_to_equiv_class(self, expr_str: str) -> Tuple[str, Expr]:
         """
-        Determines the equivalence class of a given Miasm IR expression 
+        Determines the equivalence class of a given Miasm IR expression
         (passed as string).
 
         Used as part of the parallel computation in `gen_oracle_map`.
@@ -186,7 +195,7 @@ class SimplificationOracle(object):
         Args:
             expr_str: String containing a Miasm IR expression from the
                       pre-computed library.
-        
+
         Returns:
             Tuple of equivalence class and expression.
         """
@@ -231,7 +240,7 @@ class SimplificationOracle(object):
         with multiprocessing.Pool() as pool:
             mapping = pool.map(self._expr_str_to_equiv_class, expression_strings)
         # sort into equivalence classes and unify expressions in library
-        for (equiv_class, expr) in mapping:
+        for equiv_class, expr in mapping:
             # do not add integers to the oracle
             if expr.is_int():
                 continue
@@ -242,7 +251,8 @@ class SimplificationOracle(object):
         for k in oracle_map_tmp.keys():
             # sort from smallest to largest expression (number of nodes)
             oracle_map[k] = list(
-                sorted(oracle_map_tmp[k], key=lambda x: len(x.graph().nodes())))
+                sorted(oracle_map_tmp[k], key=lambda x: len(x.graph().nodes()))
+            )
 
         return oracle_map
 
@@ -252,16 +262,16 @@ class SimplificationOracle(object):
         Evaluates an expression for an array of random values.
 
         Each input variable p0, p1, ..., pn is associated with an
-        entry in the array of inputs [i0, i1, ..., in]. In the given 
+        entry in the array of inputs [i0, i1, ..., in]. In the given
         expression, we replace p0 with i1, p1 with i1 etc. and evaluate
-        the expression. As a result, the expression results in a 
+        the expression. As a result, the expression results in a
         final constant in form of ExprInt.
 
         Args:
             expr: Expression to evaluate
             inputs_array: List of random values.
 
-        Returns: 
+        Returns:
             Int that is the return value of the evaluated expression.
         """
         # dictionary of replacements
@@ -279,7 +289,7 @@ class SimplificationOracle(object):
         return int(expr_simp(expr.replace_expr(replacements)))
 
     @staticmethod
-    def load_from_file(file_path: Path) -> 'SimplificationOracle':
+    def load_from_file(file_path: Path) -> "SimplificationOracle":
         """
         Load a pre-computed SimplificationOracle from a given file.
 
@@ -302,21 +312,19 @@ class SimplificationOracle(object):
         try:
             meta, conn, oracle_map = load_sqlite_oracle_data(file_path)
             oracle = SimplificationOracle.__new__(SimplificationOracle)
-            oracle.num_variables = meta['num_variables']
-            oracle.num_samples = meta['num_samples']
-            oracle.inputs = meta['inputs']
+            oracle.num_variables = meta["num_variables"]
+            oracle.num_samples = meta["num_samples"]
+            oracle.inputs = meta["inputs"]
             oracle._conn = conn
             oracle.oracle_map = oracle_map
             oracle._runtime_cache = {}
             return oracle
         except NotSqliteOracleError:
             # Not sqlite, try pickle
-            with open(file_path, 'rb') as f:
+            with open(file_path, "rb") as f:
                 oracle = pickle.load(f)
             if not isinstance(oracle, SimplificationOracle):
-                raise TypeError(
-                    f"Expected SimplificationOracle, found {type(oracle)}"
-                )
+                raise TypeError(f"Expected SimplificationOracle, found {type(oracle)}")
             return oracle
 
     def dump_to_file(self, file_path: Path, use_sqlite: bool = False) -> None:
@@ -332,9 +340,15 @@ class SimplificationOracle(object):
             None
         """
         if use_sqlite:
-            dump_sqlite_oracle_data(file_path, self.num_variables, self.num_samples, self.inputs, self.oracle_map)
+            dump_sqlite_oracle_data(
+                file_path,
+                self.num_variables,
+                self.num_samples,
+                self.inputs,
+                self.oracle_map,
+            )
         else:
-            with open(file_path, 'wb') as f:
+            with open(file_path, "wb") as f:
                 pickle.dump(self, f)
 
     def close(self) -> None:
@@ -344,11 +358,11 @@ class SimplificationOracle(object):
         For sqlite-backed oracles, this closes the database connection.
         For pickle-loaded oracles, this is a no-op.
         """
-        if hasattr(self, '_conn') and self._conn:
+        if hasattr(self, "_conn") and self._conn:
             self._conn.close()
             self._conn = None
 
-    def __enter__(self) -> 'SimplificationOracle':
+    def __enter__(self) -> "SimplificationOracle":
         """Enter context manager."""
         return self
 

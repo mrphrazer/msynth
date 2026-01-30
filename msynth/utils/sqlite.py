@@ -10,6 +10,7 @@ from msynth.utils.expr_utils import parse_expr
 
 class NotSqliteOracleError(Exception):
     """Raised when a file is not a valid sqlite oracle database."""
+
     pass
 
 
@@ -36,25 +37,26 @@ class SqliteOracleMap:
     @staticmethod
     def _exprs_to_bytes(exprs: List[Expr]) -> bytes:
         """Serialize list of expressions as compressed repr strings."""
-        text = '\n'.join(repr(e) for e in exprs)
+        text = "\n".join(repr(e) for e in exprs)
         return zlib.compress(text.encode(), level=9)
 
     @staticmethod
     def _bytes_to_exprs(data: bytes) -> List[Expr]:
         """Deserialize compressed repr strings back to expressions."""
         text = zlib.decompress(data).decode()
-        return [parse_expr(line) for line in text.split('\n') if line]
+        return [parse_expr(line) for line in text.split("\n") if line]
 
     def __contains__(self, key: str) -> bool:
         cur = self._conn.execute(
-            "SELECT 1 FROM equiv_classes WHERE equiv_class = ?",
-            (self._to_bin(key),))
+            "SELECT 1 FROM equiv_classes WHERE equiv_class = ?", (self._to_bin(key),)
+        )
         return cur.fetchone() is not None
 
     def __getitem__(self, key: str) -> List[Expr]:
         cur = self._conn.execute(
             "SELECT members FROM equiv_classes WHERE equiv_class = ?",
-            (self._to_bin(key),))
+            (self._to_bin(key),),
+        )
         row = cur.fetchone()
         if row is None:
             raise KeyError(key)
@@ -74,7 +76,9 @@ class SqliteOracleMap:
         return cur.fetchone()[0]
 
 
-def load_sqlite_oracle_data(file_path: Path) -> Tuple[Dict[str, Any], sqlite3.Connection, SqliteOracleMap]:
+def load_sqlite_oracle_data(
+    file_path: Path,
+) -> Tuple[Dict[str, Any], sqlite3.Connection, SqliteOracleMap]:
     """Load oracle data from sqlite database.
 
     Args:
@@ -95,9 +99,9 @@ def load_sqlite_oracle_data(file_path: Path) -> Tuple[Dict[str, Any], sqlite3.Co
         raw_meta = dict(cur.fetchall())
 
         meta = {
-            'num_variables': raw_meta['num_variables'],
-            'num_samples': raw_meta['num_samples'],
-            'inputs': pickle.loads(raw_meta['inputs']),
+            "num_variables": raw_meta["num_variables"],
+            "num_samples": raw_meta["num_samples"],
+            "inputs": pickle.loads(raw_meta["inputs"]),
         }
 
         return meta, conn, SqliteOracleMap(conn)
@@ -127,14 +131,18 @@ def dump_sqlite_oracle_data(
 
     conn = sqlite3.connect(file_path)
     conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value BLOB)")
-    conn.execute("CREATE TABLE equiv_classes (equiv_class BLOB PRIMARY KEY, members BLOB)")
+    conn.execute(
+        "CREATE TABLE equiv_classes (equiv_class BLOB PRIMARY KEY, members BLOB)"
+    )
 
-    conn.execute("INSERT INTO metadata VALUES (?, ?)", ('num_variables', num_variables))
-    conn.execute("INSERT INTO metadata VALUES (?, ?)", ('num_samples', num_samples))
-    conn.execute("INSERT INTO metadata VALUES (?, ?)", ('inputs', pickle.dumps(inputs)))
+    conn.execute("INSERT INTO metadata VALUES (?, ?)", ("num_variables", num_variables))
+    conn.execute("INSERT INTO metadata VALUES (?, ?)", ("num_samples", num_samples))
+    conn.execute("INSERT INTO metadata VALUES (?, ?)", ("inputs", pickle.dumps(inputs)))
 
     for k, v in oracle_map.items():
-        conn.execute("INSERT INTO equiv_classes VALUES (?, ?)",
-                     (bytes.fromhex(k), SqliteOracleMap._exprs_to_bytes(v)))
+        conn.execute(
+            "INSERT INTO equiv_classes VALUES (?, ?)",
+            (bytes.fromhex(k), SqliteOracleMap._exprs_to_bytes(v)),
+        )
     conn.commit()
     conn.close()

@@ -15,7 +15,7 @@ class Grammar:
     that randomly map fresh variables to x0 ... xi. The grammar can deal with variables
     of differed sizes.
 
-    It stores a variable index, a size of the expressions to generate 
+    It stores a variable index, a size of the expressions to generate
     and a list of variables. To ensure that each expression uses fresh variables,
     it increments the variable index each time a fresh variable has been generated. Fresh
     variables are prefixed with a string.
@@ -48,7 +48,9 @@ class Grammar:
             Expr: Variable in Miasm IR.
         """
         self.variable_index += 1
-        return ExprId(f"{self._var_name_prefix}{self.variable_index}", choice(self.variables).size)
+        return ExprId(
+            f"{self._var_name_prefix}{self.variable_index}", choice(self.variables).size
+        )
 
     def gen_fresh_var_of_size(self, size: int) -> Expr:
         """
@@ -82,13 +84,13 @@ class Grammar:
 
     def gen_expr_for_state(self) -> Tuple[Expr, Dict[Expr, Expr]]:
         """
-        Generates a random expression with fresh variables and a replacement 
+        Generates a random expression with fresh variables and a replacement
         dictionary that maps fresh variables to x0 ... xi for a synthesis state.
         If the generated variables have different sizes, they are automatically up/downcasted.
 
         For example, it generates the expression grammar_var1 + grammar_var2
         and the dictionary {grammar_var1: x, grammar_var2: y}. If grammar_var1
-        is smaller than grammar_var2, it upcasts grammar_var1 or downcasts 
+        is smaller than grammar_var2, it upcasts grammar_var1 or downcasts
         grammar_var2.
 
         Returns:
@@ -152,7 +154,7 @@ class Grammar:
 
     def gen_terminal_for_state(self) -> Tuple[Expr, Dict[Expr, Expr]]:
         """
-        Generates a random terminal expression and a 
+        Generates a random terminal expression and a
         replacement dictionary for a synthesis state.
 
         Returns:
@@ -162,9 +164,11 @@ class Grammar:
         variable = self.gen_fresh_var()
         return variable, self.gen_replacements(1, [variable])
 
-    def gen_replacements(self, num_vars: int, fresh_variables: List[Expr]) -> Dict[Expr, Expr]:
+    def gen_replacements(
+        self, num_vars: int, fresh_variables: List[Expr]
+    ) -> Dict[Expr, Expr]:
         """
-        Generates a dictionary of replacements. For each fresh variable, 
+        Generates a dictionary of replacements. For each fresh variable,
         it chooses a variable x0 ... xi of the same size randomly.
 
         Args:
@@ -178,6 +182,7 @@ class Grammar:
         for variable_index in range(num_vars):
             fresh_variable = fresh_variables[variable_index]
             replacements[fresh_variable] = self.get_rand_var_of_size(
-                fresh_variable.size)
+                fresh_variable.size
+            )
 
         return replacements

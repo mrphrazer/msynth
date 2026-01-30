@@ -6,13 +6,13 @@ SPECIAL_VALUES = [
     0x1,
     0x2,
     0x80,
-    0xff,
+    0xFF,
     0x8000,
-    0xffff,
+    0xFFFF,
     0x8000_0000,
-    0xffff_ffff,
+    0xFFFF_FFFF,
     0x8000_0000_0000_0000,
-    0xffff_ffff_ffff_ffff,
+    0xFFFF_FFFF_FFFF_FFFF,
 ]
 
 
@@ -65,7 +65,7 @@ def gen_inputs(num_variables: int, num_samples: int) -> List[List[int]]:
     The oracle inputs are a nested lists of ints:
 
     - the inner lists hold random values, one for each input variable in the synthesis function
-    - the outer list represents `num_samples` independent input arrays, 
+    - the outer list represents `num_samples` independent input arrays,
       the number of I/O samples for synthesis
 
     Args:

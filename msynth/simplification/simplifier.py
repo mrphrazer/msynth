@@ -27,9 +27,9 @@ class Simplifier:
     of equivalence classes that map a list of expressions with the same
     I/O behavior.
 
-    Based on this oracle, the Simplifier walks over an expression 
+    Based on this oracle, the Simplifier walks over an expression
     represented as an abstract syntax tree (AST) from the root downwards
-    and tries to simplify subtrees based on oracle-lookups. 
+    and tries to simplify subtrees based on oracle-lookups.
 
     The approach is inspired by:
     "QSynth: A Program Synthesis based Approach for Binary Code Deobfuscation" by
@@ -38,16 +38,16 @@ class Simplifier:
 
     Similar to QSynth, the Simplifier replaces already simplified subtrees
     in the original expression with placeholder variables to reduce
-    the number of variables in too complex expressions. For this, the 
+    the number of variables in too complex expressions. For this, the
     `_global_variable_prefix` attribute is used.
 
     The Simplifier applies an SMT-based equivalence check before replacing
-    subexpressions for verification. By default, it uses a pre-configured 
-    timeout and applies the replacement if the equivalence has been proven 
-    or the timeout is triggered. In case a counter-example has been found, 
-    the replacement is withdrawn. For higher confidence, the user can limit 
-    replacements to successful equivalence checks (ignoring timeouts). 
-    For this, the variable `enforce_equivalence` has to be set and, 
+    subexpressions for verification. By default, it uses a pre-configured
+    timeout and applies the replacement if the equivalence has been proven
+    or the timeout is triggered. In case a counter-example has been found,
+    the replacement is withdrawn. For higher confidence, the user can limit
+    replacements to successful equivalence checks (ignoring timeouts).
+    For this, the variable `enforce_equivalence` has to be set and,
     optionally, the `solver_timeout` to be increased.
 
 
@@ -56,7 +56,7 @@ class Simplifier:
         enforce_equivalence (bool): Flag to enforce semantic equivalence checks before replacements.
         solver_timeout (int): SMT solver timeout in seconds.
 
-    Private Attributes:        
+    Private Attributes:
         _translator_ast (AbstractSyntaxTreeTranslator): Translator to translate Miasm IR expressions into ASTs.
         _translator_z3 (TranslatorZ3): Translator to translate Miasm IR expressions into Z3 expressions.
         _solver (Z3Solver): SMT Solver instance.
@@ -65,7 +65,12 @@ class Simplifier:
 
     """
 
-    def __init__(self, oracle_path: Path, enforce_equivalence: bool = False, solver_timeout: int = 1):
+    def __init__(
+        self,
+        oracle_path: Path,
+        enforce_equivalence: bool = False,
+        solver_timeout: int = 1,
+    ):
         """
         Intializes an instance of Simplifier.
 
@@ -89,7 +94,7 @@ class Simplifier:
         """
         Checks with an SMT solver if two expressions are semantically equivalent.
 
-        Two expressions are semantically equivalent if 
+        Two expressions are semantically equivalent if
         SMT(f1 != f2) returns UNSAT. In case of SAT,
         the SMT solver found a concrete counterexample.
         For UNKNOWN, the defined timeout was triggered.
@@ -106,8 +111,9 @@ class Simplifier:
         # set solver timeout (Z3 expects timeout in ms)
         self._solver.set("timeout", self.solver_timeout * 1000)
         # add contraints
-        self._solver.add(self._translator_z3.from_expr(
-            f1) != self._translator_z3.from_expr(f2))
+        self._solver.add(
+            self._translator_z3.from_expr(f1) != self._translator_z3.from_expr(f2)
+        )
 
         return self._solver.check()
 
@@ -155,18 +161,19 @@ class Simplifier:
 
         # if all evaluate to same constant, add/replace equiv class with constant
         if len(set(outputs)) == 1:
-            self.oracle.set_equiv_class(equiv_class, [ExprInt(
-                outputs[0], expr.size)])
+            self.oracle.set_equiv_class(equiv_class, [ExprInt(outputs[0], expr.size)])
 
         return equiv_class
 
-    def _reverse_global_unification(self, expr: Expr, unification_dict: Dict[Expr, Expr]) -> Expr:
+    def _reverse_global_unification(
+        self, expr: Expr, unification_dict: Dict[Expr, Expr]
+    ) -> Expr:
         """
         Iteratively reverses the global unifications of an expression.
 
         For the given unification dictionary, unification variables can
         be part of other unification rules. To reverse all unifications
-        in a given expression, the reverse unification process is applied 
+        in a given expression, the reverse unification process is applied
         iteratively.
 
         Example: Given: {r0: x + r1, r1: y} and expression r0 + r1.
@@ -182,7 +189,12 @@ class Simplifier:
             Expression with reversed unification.
         """
         # while there is any unification variable remaining in the expression
-        while any([v.name.startswith(self._global_variable_prefix) for v in get_unique_variables(expr)]):
+        while any(
+            [
+                v.name.startswith(self._global_variable_prefix)
+                for v in get_unique_variables(expr)
+            ]
+        ):
             # replace in expression
             expr = expr.replace_expr(unification_dict)
 
@@ -192,7 +204,7 @@ class Simplifier:
         """
         Helper function to generate a global placeholder variable.
 
-        Global placeholder variables are used in the simplifier to 
+        Global placeholder variables are used in the simplifier to
         reduce the number of variables in too complex expressions.
 
         Args:
@@ -204,7 +216,9 @@ class Simplifier:
         """
         return ExprId(f"{self._global_variable_prefix}{index}", size)
 
-    def _is_suitable_simplification_candidate(self, expr: Expr, simplified: Expr) -> bool:
+    def _is_suitable_simplification_candidate(
+        self, expr: Expr, simplified: Expr
+    ) -> bool:
         """
         Checks if a simplification candidate is not suitable.
 
@@ -224,8 +238,8 @@ class Simplifier:
         3. If the original expression is semantically equivalent to the simplified one.
            Since this query is computationally expensive, we, by default, set a small
            timeout and check only if the SMT solver is not able to find a proof for
-           inequivalence in the provided time. If the solver was not able to proof 
-           the equivalence within the provided time, we still accept it. 
+           inequivalence in the provided time. If the solver was not able to proof
+           the equivalence within the provided time, we still accept it.
 
            The user has the possibility to enforce the SMT-based equivalence check
            to be successful by setting the `enforce_equivalence` flag and
@@ -239,24 +253,31 @@ class Simplifier:
             True if simplification should be skipped, False otherwise.
         """
         # contains placeholder variables
-        if any([re.search("^p[0-9]*", v.name) for v in get_unique_variables(simplified)]):
+        if any(
+            [re.search("^p[0-9]*", v.name) for v in get_unique_variables(simplified)]
+        ):
             return False
         # same normalized expression
         if not simplified.is_int() and expr_simp(expr) == expr_simp(simplified):
             return False
         # SMT solver proves non-equivalence or timeouts
-        if self.enforce_equivalence and self.check_semantical_equivalence(expr, simplified) != z3.unsat:
+        if (
+            self.enforce_equivalence
+            and self.check_semantical_equivalence(expr, simplified) != z3.unsat
+        ):
             return False
         # SMT solver finds a counter example
         if self.check_semantical_equivalence(expr, simplified) == z3.sat:
             return False
         return True
 
-    def _find_suitable_simplification(self, equiv_class: str, expr: Expr, unification_dict: Dict[Expr, Expr]) -> Tuple[bool, Expr]:
+    def _find_suitable_simplification(
+        self, equiv_class: str, expr: Expr, unification_dict: Dict[Expr, Expr]
+    ) -> Tuple[bool, Expr]:
         """
         Finds a suitable simplified expression from the equivalence class.
 
-        We query the oracle for all simplification candidates for a given equivalence 
+        We query the oracle for all simplification candidates for a given equivalence
         class and iteratively check if we find a suitable candidate. For each candidate,
         we have to inverse the unification (replacing p0, p1 etc. with terminal symbols
         of the original expression) and check if the simplification is suitable. In other
@@ -274,7 +295,6 @@ class Simplifier:
         """
         # walk over all simplification candidates
         for candidate in self.oracle.get_equiv_class_members(equiv_class):
-
             # reverse unification of simplification candidate
             simplified = reverse_unification(candidate, unification_dict)
 
@@ -300,14 +320,14 @@ class Simplifier:
            can be represented as an equivalence class that is already
            contained in the pre-computed oracle. For this, we have to
            unify the subtree (by replacing terminal nodes with place
-           holder variables), re-apply the unifications to simplification 
+           holder variables), re-apply the unifications to simplification
            candidates and check if it is suitable.
 
         3. If a suitable simplification candidate is found, we store it in an
            dictionary and replace the subtree with a placeholder variable in the
-           AST. 
+           AST.
 
-        4. If no more simplifications can be applied, we recursively replace all 
+        4. If no more simplifications can be applied, we recursively replace all
            place holder variables with the simplified subtrees in the AST.
 
         Args:
@@ -338,7 +358,8 @@ class Simplifier:
 
                 # determine subtree's equivalence class
                 equiv_class = self.determine_equivalence_class(
-                    subtree.replace_expr(unification_dict))
+                    subtree.replace_expr(unification_dict)
+                )
 
                 # if the equivalence class is in the pre-computed oracle:
                 if self.oracle.contains_equiv_class(equiv_class):
@@ -353,7 +374,8 @@ class Simplifier:
 
                     # generate global placeholder variable
                     global_variable = self._gen_global_variable_replacement(
-                        global_ctr, subtree.size)
+                        global_ctr, subtree.size
+                    )
                     global_ctr += 1
 
                     # map global placeholder variable to simplified subtree

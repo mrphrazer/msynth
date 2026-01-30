@@ -12,7 +12,7 @@ class SynthesisOracle:
     Synthesis Oracle used for I/O sampling.
 
     Intuitively, it models the semantic I/O behavior of a
-    single mathematical function f(x0, ..., xi) for i parameters 
+    single mathematical function f(x0, ..., xi) for i parameters
     and a fixed number of input-output samples.
 
     The function is approximated by storing a dictionary (the synthesis map)
@@ -31,7 +31,7 @@ class SynthesisOracle:
         Args:
             synthesis_map (Dict[Tuple[Expr, ...], Expr]): Dictionary of input-output behavior.
         """
-        # ensure that synthesis_map contains at least one I/O pair 
+        # ensure that synthesis_map contains at least one I/O pair
         if len(synthesis_map) == 0:
             raise ValueError(
                 "SynthesisOracle is empty but should contain at least one I/O pair."
@@ -43,11 +43,13 @@ class SynthesisOracle:
             for inputs, output in synthesis_map.items()
         ]
 
-    def gen_from_expression(expr: Expr, variables: List[Expr], num_samples: int) -> SynthesisOracle:
+    def gen_from_expression(
+        expr: Expr, variables: List[Expr], num_samples: int
+    ) -> SynthesisOracle:
         """
         Builds a SynthesisOracle instance from a given expression.
 
-        For a given expression, `num_samples` independent I/O pairs are 
+        For a given expression, `num_samples` independent I/O pairs are
         evaluated as follows:
 
         1. We generate a list of random values, one for each variable. Random values

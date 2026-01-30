@@ -24,7 +24,7 @@ class Mutator:
     The first two mutations are enabled by default. The mutator
     provides the functionality to enable additional mutations
     by analyzing a provided expression that represents a function
-    f(x0, ..., xi). 
+    f(x0, ..., xi).
 
     Mutations operate on the synthesis state by modifying its `expr_ast`
     as well as updating it replacement dictionary accordingly. At the end of
@@ -50,12 +50,12 @@ class Mutator:
         self.sizes_casting: List[int] = []
         self.mutations = [
             self.replace_subexpression_with_leaf,
-            self.replace_subexpression_with_expression
+            self.replace_subexpression_with_expression,
         ]
 
     def gen_from_expression(expr: Expr, grammar: Grammar) -> Mutator:
         """
-        Generates a mutator for a provided expression that 
+        Generates a mutator for a provided expression that
         represents a function f(x0, ..., xi). It enables
         different mutations based on the provided expression
 
@@ -78,7 +78,7 @@ class Mutator:
         """
         Checks if type cast mutations should be enabled.
 
-        The mutations will be enabled if the provided expression 
+        The mutations will be enabled if the provided expression
         contains subexpressions of different sizes. For each size,
         the bitmask will be calculated and used as size for type castings.
 
@@ -87,7 +87,8 @@ class Mutator:
         """
         # calculate bitmasks
         bitmasks = list(
-            sorted(set([(1 << e.size) - 1 for e in get_subexpressions(expr)])))
+            sorted(set([(1 << e.size) - 1 for e in get_subexpressions(expr)]))
+        )
 
         # more than one size
         if len(bitmasks) > 1:
@@ -100,7 +101,7 @@ class Mutator:
         """
         Applies different mutations to a synthesis state.
 
-        It randomly samples a value n and performs n random 
+        It randomly samples a value n and performs n random
         enabled mutations sequentially to the synthesis state.
 
         Args:
@@ -118,7 +119,7 @@ class Mutator:
         Mutation to replace a subexpression with a leaf.
 
         The mutation randomly selects a subexpression and a random
-        terminal expression. Then, it replaces the variable in the state 
+        terminal expression. Then, it replaces the variable in the state
         accordingly. Finally, the state in cleaned up.
 
         Example:
@@ -140,20 +141,21 @@ class Mutator:
         # replace subexpression with fresh variable in AST
         state.expr_ast = state.expr_ast.replace_expr({sub_expr: v})
         # update replacement dictionary
-        state.replacements.update(
-            {v: self.grammar.get_rand_var_of_size(v.size)})
+        state.replacements.update({v: self.grammar.get_rand_var_of_size(v.size)})
 
         # clean state
         state.cleanup()
 
         return state
 
-    def replace_subexpression_with_expression(self, state: SynthesisState) -> SynthesisState:
+    def replace_subexpression_with_expression(
+        self, state: SynthesisState
+    ) -> SynthesisState:
         """
         Mutation to replace a subexpression with an expression.
 
         The mutation randomly selects a subexpression and generates a new
-        random expression from the grammar. Then, it replaces the subexpression in the state 
+        random expression from the grammar. Then, it replaces the subexpression in the state
         accordingly. Finally, the state in cleaned up.
 
         The newly generated expression is an AST of depth 1.

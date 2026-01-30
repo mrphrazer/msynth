@@ -1,7 +1,19 @@
 import re
 from typing import Callable, List, Dict
-from miasm.expression.expression import Expr, ExprInt, ExprId, ExprSlice, ExprMem, \
-    ExprCond, ExprCompose, ExprOp, ExprAssign, ExprLoc, LocKey
+from miasm.expression.expression import (
+    Expr,
+    ExprInt,
+    ExprId,
+    ExprSlice,
+    ExprMem,
+    ExprCond,
+    ExprCompose,
+    ExprOp,
+    ExprAssign,
+    ExprLoc,
+    LocKey,
+)
+
 
 def parse_expr(expr_str: str) -> Expr:
     """
@@ -34,11 +46,11 @@ def gen_unification_dict(expr: Expr) -> Dict[Expr, Expr]:
     """
     Generates a dictionary of unificiation variables.
 
-    For each unification candidate (terminal expressions such 
+    For each unification candidate (terminal expressions such
     as registers or memory), we generate placeholder variables
     p<index> of the corresponding terminal expression size.
 
-    The resulting dictionary maps termial expressions to their 
+    The resulting dictionary maps termial expressions to their
     corresponding unification.
 
     Args:
@@ -53,6 +65,7 @@ def gen_unification_dict(expr: Expr) -> Dict[Expr, Expr]:
         for index, unique_var in enumerate(get_unification_candidates(expr))
     }
 
+
 def get_unique_variables(expr: Expr) -> List[Expr]:
     """
     Get all unique variables in an expression.
@@ -65,7 +78,7 @@ def get_unique_variables(expr: Expr) -> List[Expr]:
     Returns:
         Sorted list of unique variables.
     """
-    l = set()
+    variables = set()
 
     def add_to_set(e: Expr) -> Expr:
         """
@@ -78,20 +91,20 @@ def get_unique_variables(expr: Expr) -> List[Expr]:
             Expression.
         """
         if e.is_id():
-            l.add(e)
+            variables.add(e)
         return e
 
     expr.visit(add_to_set)
 
-    return sorted(l, key=lambda x: str(x))
+    return sorted(variables, key=lambda x: str(x))
 
 
 def get_unification_candidates(expr: Expr) -> List[Expr]:
     """
     Get all unification candidates in an expression.
 
-    A unification candidate is a leaf in an abstract 
-    syntax tree (variable, memory or label). Integers 
+    A unification candidate is a leaf in an abstract
+    syntax tree (variable, memory or label). Integers
     are excluded.
 
     To provide deterministic behavior, the list is sorted.
@@ -106,7 +119,7 @@ def get_unification_candidates(expr: Expr) -> List[Expr]:
 
     def add_to_set(e: Expr) -> Expr:
         """
-        Helper function to add variables, memory 
+        Helper function to add variables, memory
         and labels to a set.
 
         Args:
@@ -144,7 +157,7 @@ def get_subexpressions(expr: Expr) -> List[Expr]:
     Returns:
         List of expressions.
     """
-    l = []
+    expressions = []
 
     def add_to_list(e: Expr) -> Expr:
         """
@@ -157,12 +170,12 @@ def get_subexpressions(expr: Expr) -> List[Expr]:
         Returns:
             Expression.
         """
-        l.append(e)
+        expressions.append(e)
         return e
 
     expr.visit(add_to_list)
 
-    return list(reversed(l))
+    return list(reversed(expressions))
 
 
 def compile_expr_to_python(expr: Expr) -> Callable[[List[int]], int]:
@@ -213,7 +226,7 @@ def compile_expr_to_python(expr: Expr) -> Callable[[List[int]], int]:
             name = e.name
             if name.startswith("p") and name[1:].isdigit():
                 idx = int(name[1:])
-                var_mask = (1 << e.size) - 1 # Mask input to variable's declared size
+                var_mask = (1 << e.size) - 1  # Mask input to variable's declared size
                 return f"(i[{idx}]&{var_mask})"
             else:
                 raise ValueError(f"Unknown variable: {name}")
@@ -221,7 +234,7 @@ def compile_expr_to_python(expr: Expr) -> Callable[[List[int]], int]:
         elif isinstance(e, ExprOp):
             op = e.op
             args = e.args
-            op_mask = (1 << e.size) - 1 # Mask for this operation's result size
+            op_mask = (1 << e.size) - 1  # Mask for this operation's result size
 
             if len(args) == 1:
                 a = compile_node(args[0])
@@ -236,11 +249,11 @@ def compile_expr_to_python(expr: Expr) -> Callable[[List[int]], int]:
                 elif op == "cntleadzeros":
                     size = e.size
                     return f"({size}-({a}).bit_length() if {a} else {size})"
-                elif (m := re.fullmatch(r"zeroExt_(\d+)", op)):
+                elif m := re.fullmatch(r"zeroExt_(\d+)", op):
                     target_size = int(m.group(1))
                     target_mask = (1 << target_size) - 1
                     return f"(({a})&{target_mask})"
-                elif (m := re.fullmatch(r"signExt_(\d+)", op)):
+                elif m := re.fullmatch(r"signExt_(\d+)", op):
                     target_size = int(m.group(1))
                     source_size = args[0].size
                     target_mask = (1 << target_size) - 1
