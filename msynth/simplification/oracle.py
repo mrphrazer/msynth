@@ -89,7 +89,6 @@ class SimplificationOracle(object):
             return [func(input_array) for input_array in self.inputs]
         except ValueError as e:
             # Fallback to slower tree-walking evaluation for unsupported expression types
-            warnings.warn(f"compile_expr fallback: {e} - consider adding support in compile_expr()")
             return [self.evaluate_expression(expr, input_array) for input_array in self.inputs]
 
     @staticmethod

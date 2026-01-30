@@ -10,7 +10,7 @@ import msynth.synthesis.oracle as synth_oracle
 
 
 def test_synthesis_oracle_from_expression(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Deterministic inputs for sampling
+    # deterministic inputs for sampling
     seq = iter([1, 2, 3, 4, 5, 6])
 
     def fake_get_rand_input() -> int:
@@ -36,7 +36,7 @@ def test_synthesis_oracle_rejects_empty_map() -> None:
 
 
 def test_synthesis_oracle_requires_exprint_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Force expr_simp to return a non-int expression to trigger the type check.
+    # force expr_simp to return a non-int expression to trigger the type check.
     def fake_expr_simp(_expr):
         return ExprId("x", 8)
 
@@ -47,3 +47,16 @@ def test_synthesis_oracle_requires_exprint_outputs(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(TypeError, match="ExprInt"):
         synth_oracle.SynthesisOracle.gen_from_expression(expr, [p0], num_samples=1)
+
+
+def test_synthesis_oracle_overwrites_duplicate_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get_rand_input() -> int:
+        return 1
+
+    monkeypatch.setattr(synth_oracle, "get_rand_input", fake_get_rand_input)
+
+    p0 = ExprId("p0", 8)
+    expr = ExprOp("+", p0, ExprInt(1, 8))
+    oracle = synth_oracle.SynthesisOracle.gen_from_expression(expr, [p0], num_samples=3)
+
+    assert len(oracle.synthesis_map) == 1

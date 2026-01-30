@@ -19,7 +19,7 @@ def test_gen_inputs_shape(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_get_rand_input_branches(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Force coin outcomes 0..4 in order, and return deterministic values for each branch.
+    # force coin outcomes 0..4 in order, and return deterministic values for each branch.
     coin_values = iter([0, 1, 2, 3, 4])
     value_map = {
         8: 0x12,
@@ -42,7 +42,7 @@ def test_get_rand_input_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_getrandbits.expect_value = False
 
     def fake_choice(vals: List[int]) -> int:
-        # Use a known special value to validate the special-values path.
+        # use a known special value to validate the special-values path.
         return vals[0]
 
     monkeypatch.setattr(sampling, "getrandbits", fake_getrandbits)
@@ -53,3 +53,19 @@ def test_get_rand_input_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sampling.get_rand_input() == value_map[32]
     assert sampling.get_rand_input() == value_map[64]
     assert sampling.get_rand_input() == sampling.SPECIAL_VALUES[0]
+
+
+def test_gen_inputs_array_uses_get_rand_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    seq = iter([10, 20, 30])
+
+    def fake_get_rand_input() -> int:
+        return next(seq)
+
+    monkeypatch.setattr(sampling, "get_rand_input", fake_get_rand_input)
+
+    assert sampling.gen_inputs_array(3) == [10, 20, 30]
+
+
+def test_gen_inputs_edge_cases() -> None:
+    assert sampling.gen_inputs(num_variables=0, num_samples=3) == [[], [], []]
+    assert sampling.gen_inputs(num_variables=2, num_samples=0) == []

@@ -219,7 +219,7 @@ def build_cases() -> List[Dict[str, Any]]:
 
     # bitwise not op name is intentionally excluded from these tests
 
-    # Additional size variants and signed/unsigned comparisons
+    # additional size variants and signed/unsigned comparisons
     add_case("add_8", ExprOp("+", p0_8, p1_8), [0x12, 0x34])
     add_case("add_16", ExprOp("+", ExprId("p0", 16), ExprId("p1", 16)), [0x1234, 0x00FF])
     add_case("sub_8", ExprOp("-", p0_8, p1_8), [0x01, 0x02])
@@ -458,7 +458,7 @@ def test_compile_randomized_compose_slice_cond() -> None:
         slice_expr = ExprSlice(p0, slice_start, slice_stop)
         cond_bit = ExprSlice(p1, 0, 1)
         cond_expr = ExprCond(cond_bit, slice_expr, ExprInt(0, slice_stop - slice_start))
-        # Compose two slices of equal size if possible
+        # compose two slices of equal size if possible
         if size >= 8:
             left = ExprSlice(p0, 0, size // 2)
             right = ExprSlice(p1, 0, size // 2)
