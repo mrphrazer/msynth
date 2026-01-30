@@ -40,13 +40,15 @@ class Synthesizer:
     Grégoire Menguy, Sébastien Bardin, Richard Bonichon and Cauim de Souza de Lima (CCS 2021).
     Link: https://binsec.github.io/assets/publications/papers/2021-ccs.pdf
 
-    The synthesizer provides the functionality to synthesize an expression based on a 
-    given (complex) expression that represents a mathematical function f(x0, ..., xi) 
+    The synthesizer provides the functionality to synthesize an expression based on a
+    given (complex) expression that represents a mathematical function f(x0, ..., xi)
     with i inputs. Based on this expression, synthesis oracle, grammar and mutator
     will be automatically initialized. The synthesis can also be processed in parallel.
     """
 
-    def synthesize_from_expression(self, expr: Expr, num_samples: int) -> Tuple[Expr, float]:
+    def synthesize_from_expression(
+        self, expr: Expr, num_samples: int
+    ) -> Tuple[Expr, float]:
         """
         Synthesizes an expression from a given expression that represents a function f(x0, ..., xi).
 
@@ -75,8 +77,7 @@ class Synthesizer:
         variables = get_unique_variables(expr)
 
         # generate synthesis oracle
-        oracle = SynthesisOracle.gen_from_expression(
-            expr, variables, num_samples)
+        oracle = SynthesisOracle.gen_from_expression(expr, variables, num_samples)
 
         # init grammar
         grammar = Grammar(expr.size, variables)
@@ -88,8 +89,7 @@ class Synthesizer:
         state, score = self.iterated_local_search(mutator, oracle)
 
         # reverse unification and re-apply original variables
-        expr = reverse_unification(
-            state.get_expr_simplified(), unification_dict)
+        expr = reverse_unification(state.get_expr_simplified(), unification_dict)
 
         # upcast expression if necessary
         if grammar.size > expr.size:
@@ -97,7 +97,9 @@ class Synthesizer:
 
         return expr, score
 
-    def synthesize_from_expression_parallel(self, expr: Expr, num_samples: int) -> Tuple[Expr, float]:
+    def synthesize_from_expression_parallel(
+        self, expr: Expr, num_samples: int
+    ) -> Tuple[Expr, float]:
         """
         Performs the synthesis for a given expression that represents a function f(x0, ..., xi) in parallel.
 
@@ -155,21 +157,22 @@ class Synthesizer:
             Expr: Simplified Expression in Miasm IR.
         """
         # synthesize
-        synthesized, score = self.synthesize_from_expression(
-            expr, num_samples)
+        synthesized, score = self.synthesize_from_expression(expr, num_samples)
         # check if perfect score
         if score == 0.0:
             return synthesized
 
         return expr
 
-    def iterated_local_search(self, mutator: Mutator, oracle: SynthesisOracle, timeout: int = 60) -> Tuple[SynthesisState, float]:
+    def iterated_local_search(
+        self, mutator: Mutator, oracle: SynthesisOracle, timeout: int = 60
+    ) -> Tuple[SynthesisState, float]:
         """
         Performs an iterative local search (ILS) to synthesize an expression for a given synthesis oracle.
 
         The algorithm tries to find a synthesis state that minimizes the distance function. Starting with an AST
         representing a single leaf, it iteratively switches between perturbation and side search. The perturbation
-        mutates the best state (found so far) by replacing a subexpression with a leaf node. Afterward, it tries 
+        mutates the best state (found so far) by replacing a subexpression with a leaf node. Afterward, it tries
         to find better synthesis states in the side search by applying more aggressive mutations. The mutated state is
         discarded, unless it is better than the current state. If the side search does not find a better state
         (with a lower score) within 100 iterations, the algorithm continues with perturbation.
@@ -194,8 +197,7 @@ class Synthesizer:
             Tuple[SynthesisState, float]: Best synthesis state and its score.
         """
         # init states
-        current_state = SynthesisState(
-            *mutator.grammar.gen_terminal_for_state())
+        current_state = SynthesisState(*mutator.grammar.gen_terminal_for_state())
         current_score = float("inf")
 
         best_state = current_state.clone()
@@ -208,8 +210,7 @@ class Synthesizer:
         # start ILS
         while time.time() - start_time < timeout:
             # perturbation
-            current_state = mutator.replace_subexpression_with_leaf(
-                current_state)
+            current_state = mutator.replace_subexpression_with_leaf(current_state)
 
             # side search
             change_counter = 0
@@ -219,7 +220,8 @@ class Synthesizer:
                 # mutate and score
                 proposed_state = mutator.mutate(current_state)
                 proposed_score = proposed_state.get_score(
-                    oracle, mutator.grammar.variables)
+                    oracle, mutator.grammar.variables
+                )
 
                 # the proposed state is better
                 if proposed_score < current_score:

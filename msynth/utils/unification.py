@@ -6,7 +6,7 @@ from msynth.utils.expr_utils import get_unification_candidates
 
 def invert_dict(d: Dict[Expr, Expr]) -> Dict[Expr, Expr]:
     """
-    Inverts a dictionary by swapping keys and values 
+    Inverts a dictionary by swapping keys and values
     (each key k becomes the value of its value v).
 
     Args:
@@ -22,11 +22,11 @@ def gen_unification_dict(expr: Expr) -> Dict[Expr, Expr]:
     """
     Generates a dictionary of unificiation variables.
 
-    For each unification candidate (terminal expressions such 
+    For each unification candidate (terminal expressions such
     as registers or memory), we generate placeholder variables
     p<index> of the corresponding terminal expression size.
 
-    The resulting dictionary maps termial expressions to their 
+    The resulting dictionary maps termial expressions to their
     corresponding unification.
 
     Args:

@@ -13,27 +13,27 @@ class SynthesisState:
     """
     Container that wraps an expression as a synthesis state.
 
-    It provides functionality to manage the expression and to calculate it's score 
+    It provides functionality to manage the expression and to calculate it's score
     (used as feedback for the synthesizer).
 
     Understanding an expression as an abstract syntax tree (AST), variables in the expression
     represent leaves in the AST; an AST can have several leaves that represent the same variable.
-    To allow the modification of individual leaves without changing all leaves 
+    To allow the modification of individual leaves without changing all leaves
     that represent the same variable, the expression management is realized as follows:
 
     The SynthesisState manages an expression `expr_ast` in which each variable is unique. Additionally,
-    it keeps a dictionary of replacements called `replacements` that maps each variable/leaf 
+    it keeps a dictionary of replacements called `replacements` that maps each variable/leaf
     to a variable in the synthesis domain. To optimize score calculation, it also keeps the original
     expression in the internal data variable `_expr`.
 
-    For example, x and y are leaves in the AST (x + y) * x. We store the expression 
+    For example, x and y are leaves in the AST (x + y) * x. We store the expression
     as (t1 + t2) * t3 and create a replacement dictionary {t1: x, t2: y, t3: x}. The internal
     variable `_expr` stores (x + y) * x.
 
     Attributes:
         expr_ast (Expr): Expression in Miasm IR with unique variables/leaves.
         replacements (Dict[Expr, Expr]): Dictionary of variable replacements.
-    
+
     Private Attributes:
         _expr (Expr): Internal expression, stored for optimization.
     """
@@ -131,7 +131,9 @@ class SynthesisState:
                 return compiled(input_list)
 
             # use cached int samples from the oracle when available
-            samples_int: List[Tuple[Tuple[int, ...], int]] | None = getattr(oracle, "_samples_int", None)
+            samples_int: List[Tuple[Tuple[int, ...], int]] | None = getattr(
+                oracle, "_samples_int", None
+            )
             if samples_int is None:
                 # build the cache lazily for legacy oracles
                 samples_int = [
@@ -184,7 +186,7 @@ class SynthesisState:
 
     def get_expr_simplified(self) -> Expr:
         """
-        Returns the expression with applied replacements 
+        Returns the expression with applied replacements
         and Miasm's simplification rules.
 
         Returns:
@@ -197,7 +199,7 @@ class SynthesisState:
         Cleanup the replacement dictionary.
 
         For optimization purposes, the function scans
-        all variables that are used in the current AST, 
+        all variables that are used in the current AST,
         copies their replacements and replaces the original
         dictionary afterward. This way, dead variables in the
         replacement dictionary are removed.

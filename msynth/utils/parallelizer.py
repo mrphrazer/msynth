@@ -11,7 +11,7 @@ class Parallelizer(object):
     A task is a tuple of worker and string representing a task group.
     A task group is a group of workers that execute the same task.
     If any worker finds a solution, all other workers of the same
-    task group will be killed/not started. 
+    task group will be killed/not started.
 
     Attributes:
         tasks (List[Tuple[Any, str]]): List of functions to execute
@@ -22,7 +22,7 @@ class Parallelizer(object):
         max_processes (int): maximum number of processes to launch.
     """
 
-    def __init__(self, tasks: 'List[Tuple[Any, str]]', max_processes: int = 0):
+    def __init__(self, tasks: "List[Tuple[Any, str]]", max_processes: int = 0):
         """
         Initializes the Parallelizer.
 
@@ -30,7 +30,7 @@ class Parallelizer(object):
             tasks (List[Tuple[partial[Any], str]]): List of tasks.
             max_processes (int, optional): Number of workers to execute in parallel. Defaults to 0.
         """
-        self.functions: 'List[Any]' = [t for (t, _) in tasks]
+        self.functions: "List[Any]" = [t for (t, _) in tasks]
         self.task_groups: List[str] = [tg for (_, tg) in tasks]
 
         self.process_to_task_group: Dict[Process, str] = dict()
@@ -72,7 +72,8 @@ class Parallelizer(object):
 
             # create process
             processes[i] = multiprocessing.Process(
-                target=self.functions[i], args=(results, i))
+                target=self.functions[i], args=(results, i)
+            )
 
             # map process to process index
             process_to_index[processes[i]] = i
@@ -92,7 +93,10 @@ class Parallelizer(object):
         # iterate until all processes have been processed
         while len(done) < len(processes):
             # add more processes, if # processes < # cpu cores and there are processes remaining
-            while len(active_processes) < self.max_processes and process_counter < len(processes) - 1:
+            while (
+                len(active_processes) < self.max_processes
+                and process_counter < len(processes) - 1
+            ):
                 # increase index
                 process_counter += 1
                 # random process index
