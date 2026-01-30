@@ -2,7 +2,6 @@ import hashlib
 import multiprocessing
 import pickle
 import re
-import warnings
 from pathlib import Path
 from typing import Dict, Iterator, List, Set, Tuple
 
@@ -87,7 +86,7 @@ class SimplificationOracle(object):
         try:
             func = compile_expr_to_python(expr)
             return [func(input_array) for input_array in self.inputs]
-        except ValueError as e:
+        except ValueError:
             # Fallback to slower tree-walking evaluation for unsupported expression types
             return [self.evaluate_expression(expr, input_array) for input_array in self.inputs]
 

@@ -4,7 +4,7 @@ import pickle
 import pytest
 from pathlib import Path
 
-from miasm.expression.expression import ExprId, ExprInt, ExprOp
+from miasm.expression.expression import ExprId, ExprOp
 
 from msynth.simplification.oracle import SimplificationOracle
 

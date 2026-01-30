@@ -1,7 +1,7 @@
 import logging
 import multiprocessing
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Tuple
 
 from miasm.expression.expression import Expr
 from msynth.synthesis.grammar import Grammar
@@ -135,7 +135,7 @@ class Synthesizer:
         if task_group in parallelizer.task_group_results:
             result = parallelizer.task_group_results[task_group]
             # check if result found
-            if result != None:
+            if result is not None:
                 return result[0], result[1]
 
         return expr, float("inf")

@@ -1,9 +1,7 @@
 import multiprocessing
-import time
-from functools import partial
 from multiprocessing import Process
 from random import choice, shuffle
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 
 class Parallelizer(object):
@@ -91,7 +89,6 @@ class Parallelizer(object):
         random_process_indices = list(range(len(processes)))
         shuffle(random_process_indices)
 
-        start_time = time.time()
         # iterate until all processes have been processed
         while len(done) < len(processes):
             # add more processes, if # processes < # cpu cores and there are processes remaining

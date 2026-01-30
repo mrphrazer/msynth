@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import itertools
 
 import pytest
 from miasm.expression.expression import ExprId, ExprInt, ExprOp

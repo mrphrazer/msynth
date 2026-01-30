@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from miasm.expression.expression import ExprId, ExprInt, ExprLoc, ExprMem, ExprOp, LocKey
+from miasm.expression.expression import ExprId, ExprLoc, ExprMem, ExprOp, LocKey
 
 from msynth.utils.unification import gen_unification_dict, invert_dict, reverse_unification
 

@@ -65,7 +65,7 @@ def get_unique_variables(expr: Expr) -> List[Expr]:
     Returns:
         Sorted list of unique variables.
     """
-    l = set()
+    variables = set()
 
     def add_to_set(e: Expr) -> Expr:
         """
@@ -78,12 +78,12 @@ def get_unique_variables(expr: Expr) -> List[Expr]:
             Expression.
         """
         if e.is_id():
-            l.add(e)
+            variables.add(e)
         return e
 
     expr.visit(add_to_set)
 
-    return sorted(l, key=lambda x: str(x))
+    return sorted(variables, key=lambda x: str(x))
 
 
 def get_unification_candidates(expr: Expr) -> List[Expr]:
@@ -144,7 +144,7 @@ def get_subexpressions(expr: Expr) -> List[Expr]:
     Returns:
         List of expressions.
     """
-    l = []
+    expressions = []
 
     def add_to_list(e: Expr) -> Expr:
         """
@@ -157,12 +157,12 @@ def get_subexpressions(expr: Expr) -> List[Expr]:
         Returns:
             Expression.
         """
-        l.append(e)
+        expressions.append(e)
         return e
 
     expr.visit(add_to_list)
 
-    return list(reversed(l))
+    return list(reversed(expressions))
 
 
 def compile_expr_to_python(expr: Expr) -> Callable[[List[int]], int]:
