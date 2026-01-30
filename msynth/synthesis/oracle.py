@@ -33,7 +33,9 @@ class SynthesisOracle:
         """
         # ensure that synthesis_map contains at least one I/O pair 
         if len(synthesis_map) == 0:
-            raise AssertionError("SynthesisOracle is empty but should contain at least one I/O pair.")
+            raise ValueError(
+                "SynthesisOracle is empty but should contain at least one I/O pair."
+            )
         self.synthesis_map: Dict[Tuple[Expr, ...], Expr] = synthesis_map
 
     def gen_from_expression(expr: Expr, variables: List[Expr], num_samples: int) -> SynthesisOracle:
@@ -78,7 +80,10 @@ class SynthesisOracle:
             # evaluate expression to obtain output
             result = expr_simp(expr.replace_expr(replacements))
             # output should be an ExprInt
-            assert(result.is_int())
+            if not result.is_int():
+                raise TypeError(
+                    f"Expected ExprInt result from expression evaluation, got {type(result)}"
+                )
             # map list of inputs to output
             synthesis_map[tuple(inputs)] = result
 

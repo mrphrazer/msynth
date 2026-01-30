@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pickle
+import pytest
 from pathlib import Path
 
 from miasm.expression.expression import ExprId, ExprInt, ExprOp
@@ -60,3 +62,12 @@ def test_oracle_sqlite_roundtrip(tmp_path: Path) -> None:
             original_members = [e for e in oracle.oracle_map[key]]
             loaded_members = [e for e in loaded.oracle_map[key]]
             assert loaded_members == original_members
+
+
+def test_oracle_load_rejects_wrong_type(tmp_path: Path) -> None:
+    out_path = tmp_path / "oracle.pkl"
+    with open(out_path, "wb") as f:
+        pickle.dump({"not": "an oracle"}, f)
+
+    with pytest.raises(TypeError, match="SimplificationOracle"):
+        SimplificationOracle.load_from_file(out_path)

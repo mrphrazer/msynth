@@ -313,7 +313,10 @@ class SimplificationOracle(object):
             # Not sqlite, try pickle
             with open(file_path, 'rb') as f:
                 oracle = pickle.load(f)
-            assert isinstance(oracle, SimplificationOracle), f"Expected SimplificationOracle, found {type(oracle)}"
+            if not isinstance(oracle, SimplificationOracle):
+                raise TypeError(
+                    f"Expected SimplificationOracle, found {type(oracle)}"
+                )
             return oracle
 
     def dump_to_file(self, file_path: Path, use_sqlite: bool = False) -> None:

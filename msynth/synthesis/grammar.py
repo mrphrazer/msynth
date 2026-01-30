@@ -118,7 +118,10 @@ class Grammar:
                 arg2 = ExprSlice(arg2, 0, arg1.size)
 
         # sizes have to be equal
-        assert(arg1.size == arg2.size)
+        if arg1.size != arg2.size:
+            raise RuntimeError(
+                f"Argument sizes diverged after coercion: {arg1.size} vs {arg2.size}"
+            )
 
         # flip random coin
         coin = getrandbits(32) % 9

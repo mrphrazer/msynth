@@ -28,3 +28,22 @@ def test_synthesis_oracle_from_expression(monkeypatch: pytest.MonkeyPatch) -> No
         replacements = {p0: inputs[0], p1: inputs[1]}
         expected = expr_simp(expr.replace_expr(replacements))
         assert int(output) == int(expected)
+
+
+def test_synthesis_oracle_rejects_empty_map() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        synth_oracle.SynthesisOracle({})
+
+
+def test_synthesis_oracle_requires_exprint_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Force expr_simp to return a non-int expression to trigger the type check.
+    def fake_expr_simp(_expr):
+        return ExprId("x", 8)
+
+    monkeypatch.setattr(synth_oracle, "expr_simp", fake_expr_simp)
+
+    p0 = ExprId("p0", 8)
+    expr = ExprOp("+", p0, ExprInt(1, 8))
+
+    with pytest.raises(TypeError, match="ExprInt"):
+        synth_oracle.SynthesisOracle.gen_from_expression(expr, [p0], num_samples=1)
