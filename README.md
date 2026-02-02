@@ -65,7 +65,7 @@ To generate an oracle, we need a simplification lookup table (or database) conta
 
 * and, for some tables, the constants 0x0, 0x1, 0x2, 0x80, 0xff, 0x800, 0xffff, 0x8000_0000, 0xffff_ffff, 0x8000_0000_0000_0000 and 0xffff_ffff_ffff_ffff.
 
-The example database included in [database](/database/) contains all 1,293,020 combinations created by using three variables and the constants 0x0, 0x1 and 0x2 for up to 7 nodes (e.g., `((p0 + p1) * (p2 ^ 0x2))` or `((p0 - p2) << (p1 + p2))`). Larger pre-computed databases can be found [here](https://synthesis.to/code/simplification_databases.7z) (~31GB unzipped). Note that the code for pre-computing expressions is __not__ part of this repository. We plan to release it at some point in the future.
+The example database included in [database](/database/) contains all 1,293,020 combinations created by using three variables and the constants 0x0, 0x1 and 0x2 for up to 7 nodes (e.g., `((p0 + p1) * (p2 ^ 0x2))` or `((p0 - p2) << (p1 + p2))`). Larger pre-computed databases can be found [here](https://share.synthesis.to/msynth/simplification_databases.7z) (~31GB unzipped). Note that the code for pre-computing expressions is __not__ part of this repository. We plan to release it at some point in the future.
 
 ## Stochastic Program Synthesis
 
