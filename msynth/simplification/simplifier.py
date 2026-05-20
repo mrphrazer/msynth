@@ -10,7 +10,12 @@ from miasm.ir.translators.z3_ir import TranslatorZ3
 
 from msynth.simplification.oracle import SimplificationOracle
 from msynth.simplification.preprocessing import Preprocessor, default_preprocessor
-from msynth.utils.expr_utils import get_subexpressions, get_unique_variables
+from msynth.utils.expr_utils import (
+    get_subexpressions,
+    get_unique_variables,
+    is_strictly_smaller_tree,
+)
+from msynth.utils.sampling import has_adversarial_counterexample
 from msynth.utils.unification import gen_unification_dict, reverse_unification
 
 
@@ -262,14 +267,25 @@ class Simplifier:
         # same normalized expression
         if not simplified.is_int() and expr_simp(expr) == expr_simp(simplified):
             return False
+        # Reject concrete size regressions before doing SMT work. The helper is
+        # intentionally bounded and iterative because Miasm graph construction can
+        # be expensive or recursive on very large reverse-unified candidates.
+        if not is_strictly_smaller_tree(simplified, expr):
+            return False
+        equivalence_result = self.check_semantical_equivalence(expr, simplified)
         # SMT solver proves non-equivalence or timeouts
-        if (
-            self.enforce_equivalence
-            and self.check_semantical_equivalence(expr, simplified) != z3.unsat
-        ):
+        if self.enforce_equivalence and equivalence_result != z3.unsat:
             return False
         # SMT solver finds a counter example
-        if self.check_semantical_equivalence(expr, simplified) == z3.sat:
+        if equivalence_result == z3.sat:
+            return False
+        # In permissive mode, UNKNOWN is normally accepted to avoid slow SMT proofs.
+        # Before accepting it, run a tiny deterministic edge-value probe to catch
+        # sampled-oracle collisions such as variable-shift candidates that agree on
+        # random oracle inputs but fail around modular wraparound values.
+        if equivalence_result == z3.unknown and has_adversarial_counterexample(
+            expr, simplified
+        ):
             return False
         return True
 

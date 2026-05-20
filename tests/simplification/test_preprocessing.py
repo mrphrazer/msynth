@@ -12,6 +12,7 @@ from msynth.simplification.preprocessing import (
     Preprocessor,
     default_preprocessor,
 )
+from msynth.simplification.simba import SimbaPass
 from msynth.simplification.simplifier import Simplifier
 
 
@@ -60,6 +61,7 @@ def test_default_preprocessor_starts_with_ast_normalization() -> None:
     preprocessor = default_preprocessor()
 
     assert isinstance(preprocessor.passes[0], AstNormalizationPass)
+    assert isinstance(preprocessor.passes[1], SimbaPass)
 
 
 def test_simplifier_applies_optional_preprocessor(tmp_path: Path) -> None:
@@ -82,3 +84,15 @@ def test_simplifier_uses_ast_preprocessor_by_default(tmp_path: Path) -> None:
     simplifier = Simplifier(_write_min_oracle(tmp_path))
 
     assert isinstance(simplifier.preprocessor.passes[0], AstNormalizationPass)
+    assert isinstance(simplifier.preprocessor.passes[1], SimbaPass)
+
+
+def test_default_preprocessor_runs_simba_after_ast_normalization() -> None:
+    x = ExprId("x", 8)
+    y = ExprId("y", 8)
+
+    rewritten = default_preprocessor().run(
+        ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
+    )
+
+    assert rewritten == ExprOp("+", x, y)

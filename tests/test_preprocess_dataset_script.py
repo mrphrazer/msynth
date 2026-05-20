@@ -76,6 +76,30 @@ def test_preprocess_dataset_script_can_skip_preprocessing(tmp_path: Path) -> Non
     assert record["expected_text"] == "x"
 
 
+def test_preprocess_dataset_script_accepts_simba_pass(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset.txt"
+    dataset.write_text("(x & y) + (x | y), x + y\n", encoding="utf-8")
+
+    result = run_script(str(dataset), "--size", "8", "--passes", "simba")
+
+    assert result.returncode == 0
+    record = json.loads(result.stdout)
+    assert record["expr_text"] == "(x & y) + (x | y)"
+    assert record["expected_text"] == "x + y"
+
+
+def test_preprocess_dataset_script_accepts_ast_simba_passes(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset.txt"
+    dataset.write_text("(x & y) + (x | y), x + y\n", encoding="utf-8")
+
+    result = run_script(str(dataset), "--size", "8", "--passes", "ast,simba")
+
+    assert result.returncode == 0
+    record = json.loads(result.stdout)
+    assert record["expr_text"] == "(x & y) + (x | y)"
+    assert record["expected_text"] == "x + y"
+
+
 def test_preprocess_dataset_script_writes_gzip_jsonl(tmp_path: Path) -> None:
     dataset = tmp_path / "dataset.txt"
     output = tmp_path / "cases.jsonl.gz"

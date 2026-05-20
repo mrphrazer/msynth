@@ -5,6 +5,8 @@ msynth is a code deobfuscation framework to simplify Mixed Boolean-Arithmetic (M
 
 msynth is built on top of [Miasm](https://github.com/cea-sec/miasm) and inspired by the papers 
 
+* ["Efficient Deobfuscation of Linear Mixed Boolean-Arithmetic Expressions"](https://arxiv.org/abs/2209.06335) by Benjamin Reichenwallner and Peter Meerwald-Stadler (CheckMATE 2022),
+
 * ["QSynth: A Program Synthesis based Approach for Binary Code Deobfuscation"](https://archive.bar/pdfs/bar2020-preprint9.pdf) by Robin David, Luigi Coniglio and Mariano Ceccato (NDSS, BAR 2020),
 
 * ["Syntia: Synthesizing the Semantics of Obfuscated Code"](https://synthesis.to/papers/usenix17-syntia.pdf) by Tim Blazytko, Moritz Contag, Cornelius Aschermann and Thorsten Holz (USENIX Security 2017) and
@@ -12,6 +14,8 @@ msynth is built on top of [Miasm](https://github.com/cea-sec/miasm) and inspired
 * ["Search-Based Local Blackbox Deobfuscation: Understand, Improve and Mitigate"](https://binsec.github.io/assets/publications/papers/2021-ccs.pdf) by Grégoire Menguy, Sébastien Bardin, Richard Bonichon and Cauim de Souza de Lima (CCS 2021).
 
 * ["Augmenting Search-based Program Synthesis with Local Inference Rules to Improve Black-box Deobfuscation"](https://binsec.github.io/assets/publications/papers/2025-ccs.pdf) by Vidal Attias, Nicolas Bellec, Grégoire Menguy, Sébastien Bardin and Jean-Yves Marion (CCS 2025).
+
+* ["Efficient Deobfuscation of Linear Mixed Boolean-Arithmetic Expressions"](https://arxiv.org/abs/2209.06335) by Benjamin Reichenwallner and Peter Meerwald-Stadler (CheckMATE 2022).
 
 
 It can be used in combination with Miasm's symbolic execution engine to simplify complex expressions in obfuscated code or as a standalone tool to play around with MBA simplification.

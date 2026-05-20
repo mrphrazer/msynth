@@ -9,6 +9,7 @@ from .simplification.preprocessing import (
     Preprocessor,
     default_preprocessor,
 )
+from .simplification.simba import SimbaPass
 from .simplification.oracle import SimplificationOracle
 from .simplification.simplifier import Simplifier
 from .synthesis.synthesizer import Synthesizer
@@ -17,6 +18,7 @@ __all__ = [
     "AstNormalizationPass",
     "ParsedDatasetRow",
     "Preprocessor",
+    "SimbaPass",
     "SimplificationOracle",
     "Simplifier",
     "Synthesizer",

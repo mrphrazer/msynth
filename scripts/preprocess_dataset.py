@@ -17,12 +17,14 @@ from msynth.simplification.preprocessing import (  # noqa: E402
     AstNormalizationPass,
     Preprocessor,
 )
+from msynth.simplification.simba import SimbaPass  # noqa: E402
 
 
 PASS_FACTORIES = {
     "ast": AstNormalizationPass,
+    "simba": SimbaPass,
 }
-DEFAULT_PASSES = ("ast",)
+DEFAULT_PASSES = ("ast", "simba")
 
 
 def parse_pass_list(value: str) -> tuple[str, ...]:

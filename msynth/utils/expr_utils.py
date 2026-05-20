@@ -178,6 +178,90 @@ def get_subexpressions(expr: Expr) -> List[Expr]:
     return list(reversed(expressions))
 
 
+def iter_child_expressions(expr: Expr) -> tuple[Expr, ...]:
+    """
+    Return direct child expressions without asking Miasm to build a graph.
+
+    Miasm exposes children through different attributes depending on the concrete
+    expression class:
+
+    - ``ExprOp`` and ``ExprCompose`` use ``args``.
+    - ``ExprSlice`` uses ``arg``.
+    - ``ExprMem`` uses ``ptr``.
+    - ``ExprAssign`` uses ``dst`` and ``src``.
+    - ``ExprCond`` uses ``cond``, ``src1``, and ``src2``.
+
+    This helper deliberately performs shallow attribute inspection instead of
+    using ``expr.graph()`` or recursive visitors. Some simplification candidates
+    can become very large after reverse-unification, and graph construction may
+    recurse deeply enough to be slow or hit Python recursion limits.
+    """
+    children = []
+
+    def add_child(child: Expr) -> None:
+        if child not in children:
+            children.append(child)
+
+    if isinstance(expr, (ExprOp, ExprCompose)):
+        for child in expr.args:
+            add_child(child)
+    elif isinstance(expr, ExprSlice):
+        add_child(expr.arg)
+    elif isinstance(expr, ExprMem):
+        add_child(expr.ptr)
+    elif isinstance(expr, ExprAssign):
+        add_child(expr.dst)
+        add_child(expr.src)
+    elif isinstance(expr, ExprCond):
+        add_child(expr.cond)
+        add_child(expr.src1)
+        add_child(expr.src2)
+    return tuple(children)
+
+
+def bounded_tree_size(expr: Expr, limit: int) -> int:
+    """
+    Count expression-tree nodes iteratively, stopping once ``limit`` is reached.
+
+    This is intended for cheap relative size checks, not exact reporting. If the
+    returned value equals ``limit``, callers should read it as "at least this
+    large". The function uses an explicit stack and direct child inspection to
+    avoid Miasm graph construction and recursive traversal on huge expressions.
+    """
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+
+    count = 0
+    stack = [expr]
+    while stack:
+        count += 1
+        if count >= limit:
+            return limit
+        stack.extend(iter_child_expressions(stack.pop()))
+    return count
+
+
+def is_strictly_smaller_tree(
+    candidate: Expr, original: Expr, *, max_original_size: int = 4096
+) -> bool:
+    """
+    Return True only if ``candidate`` is definitely smaller than ``original``.
+
+    The simplification oracle stores expressions in unified form. After p#
+    variables are replaced with concrete subtrees, a library expression that was
+    short in the oracle can expand into a larger concrete replacement. This guard
+    avoids accepting those regressions without calling ``graph().nodes()``.
+
+    The original expression is counted only up to ``max_original_size``. The
+    candidate is then counted only up to the original count. That makes the common
+    rejection path cheap: as soon as the candidate reaches the original size, it is
+    known not to be a strict simplification.
+    """
+    original_size = bounded_tree_size(original, max_original_size)
+    candidate_size = bounded_tree_size(candidate, original_size)
+    return candidate_size < original_size
+
+
 def compile_expr_to_python(expr: Expr) -> Callable[[List[int]], int]:
     """
     Compile a miasm expression to Python function.
