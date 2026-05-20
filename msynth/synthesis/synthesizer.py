@@ -1,7 +1,7 @@
 import logging
 import multiprocessing
 import time
-from typing import Any, Tuple
+from typing import Any, Tuple, Union
 
 from miasm.expression.expression import Expr
 from msynth.synthesis.grammar import Grammar
@@ -47,7 +47,7 @@ class Synthesizer:
     """
 
     def synthesize_from_expression(
-        self, expr: Expr, num_samples: int
+        self, expr: Expr, num_samples: int, timeout: Union[int, float] = 60
     ) -> Tuple[Expr, float]:
         """
         Synthesizes an expression from a given expression that represents a function f(x0, ..., xi).
@@ -65,6 +65,7 @@ class Synthesizer:
         Args:
             expr (Expr): Expression representing a function f(x0, ..., xi) in Miasm IR.
             num_samples (int): Number of I/O samples for the synthesis oracle.
+            timeout (int | float): Timeout in seconds for the local search.
 
         Returns:
             Tuple[Expr, float]: Synthesized expression and its corresponding score.
@@ -86,7 +87,10 @@ class Synthesizer:
         mutator = Mutator.gen_from_expression(expr, grammar)
 
         # perform stochastic search
-        state, score = self.iterated_local_search(mutator, oracle)
+        if timeout == 60:
+            state, score = self.iterated_local_search(mutator, oracle)
+        else:
+            state, score = self.iterated_local_search(mutator, oracle, timeout=timeout)
 
         # reverse unification and re-apply original variables
         expr = reverse_unification(state.get_expr_simplified(), unification_dict)
@@ -142,7 +146,9 @@ class Synthesizer:
 
         return expr, float("inf")
 
-    def simplify(self, expr: Expr, num_samples: int = 10) -> Expr:
+    def simplify(
+        self, expr: Expr, num_samples: int = 10, timeout: Union[int, float] = 60
+    ) -> Expr:
         """
         Simplifies an expression via stochastic program synthesis.
 
@@ -152,12 +158,18 @@ class Synthesizer:
         Args:
             expr (Expr): Expression to simplify in Miasm IR.
             num_samples (int, optional): Number of I/O samples for the synthesis oracle. Defaults to 10.
+            timeout (int | float): Timeout in seconds for the local search.
 
         Returns:
             Expr: Simplified Expression in Miasm IR.
         """
         # synthesize
-        synthesized, score = self.synthesize_from_expression(expr, num_samples)
+        if timeout == 60:
+            synthesized, score = self.synthesize_from_expression(expr, num_samples)
+        else:
+            synthesized, score = self.synthesize_from_expression(
+                expr, num_samples, timeout=timeout
+            )
         # check if perfect score
         if score == 0.0:
             return synthesized
@@ -165,7 +177,7 @@ class Synthesizer:
         return expr
 
     def iterated_local_search(
-        self, mutator: Mutator, oracle: SynthesisOracle, timeout: int = 60
+        self, mutator: Mutator, oracle: SynthesisOracle, timeout: Union[int, float] = 60
     ) -> Tuple[SynthesisState, float]:
         """
         Performs an iterative local search (ILS) to synthesize an expression for a given synthesis oracle.

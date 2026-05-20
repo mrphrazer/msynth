@@ -54,6 +54,33 @@ def test_synthesize_from_expression_zero_extends_on_size_mismatch(monkeypatch) -
     assert result_expr.size == 8
 
 
+def test_synthesize_from_expression_forwards_custom_timeout(monkeypatch) -> None:
+    seq = iter([1, 2, 3, 4])
+
+    def fake_get_rand_input() -> int:
+        return next(seq)
+
+    monkeypatch.setattr(synth_oracle, "get_rand_input", fake_get_rand_input)
+
+    expr = ExprId("p0", 8)
+    synth = Synthesizer()
+    seen = {}
+
+    def fake_ils(_mutator, _oracle, timeout):
+        seen["timeout"] = timeout
+        return SynthesisState(ExprId("p0", 8)), 0.0
+
+    monkeypatch.setattr(synth, "iterated_local_search", fake_ils)
+
+    result_expr, score = synth.synthesize_from_expression(
+        expr, num_samples=1, timeout=0.5
+    )
+
+    assert score == 0.0
+    assert result_expr == expr
+    assert seen["timeout"] == 0.5
+
+
 def test_iterated_local_search_returns_zero_score(monkeypatch) -> None:
     p0 = ExprId("p0", 8)
     oracle = SynthesisOracle({(ExprInt(1, 8),): ExprInt(1, 8)})
