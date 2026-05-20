@@ -6,6 +6,7 @@ from typing import Protocol, Sequence
 from miasm.expression.expression import Expr
 
 from msynth.simplification.ast import AbstractSyntaxTreeTranslator
+from msynth.simplification.simba import SimbaPass
 
 
 class RewritePass(Protocol):
@@ -38,4 +39,4 @@ class AstNormalizationPass:
 def default_preprocessor(
     extra_passes: Sequence[RewritePass] | None = None,
 ) -> Preprocessor:
-    return Preprocessor([AstNormalizationPass(), *(extra_passes or ())])
+    return Preprocessor([AstNormalizationPass(), SimbaPass(), *(extra_passes or ())])
