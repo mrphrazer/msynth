@@ -8,8 +8,8 @@ from miasm.expression.expression import Expr, ExprId, ExprInt
 from miasm.expression.simplifications import expr_simp
 from miasm.ir.translators.z3_ir import TranslatorZ3
 
-from msynth.simplification.ast import AbstractSyntaxTreeTranslator
 from msynth.simplification.oracle import SimplificationOracle
+from msynth.simplification.preprocessing import Preprocessor, default_preprocessor
 from msynth.utils.expr_utils import get_subexpressions, get_unique_variables
 from msynth.utils.unification import gen_unification_dict, reverse_unification
 
@@ -57,7 +57,6 @@ class Simplifier:
         solver_timeout (int): SMT solver timeout in seconds.
 
     Private Attributes:
-        _translator_ast (AbstractSyntaxTreeTranslator): Translator to translate Miasm IR expressions into ASTs.
         _translator_z3 (TranslatorZ3): Translator to translate Miasm IR expressions into Z3 expressions.
         _solver (Z3Solver): SMT Solver instance.
         _global_variable_prefix (str): Variable prefix for placeholder variables.
@@ -70,6 +69,7 @@ class Simplifier:
         oracle_path: Path,
         enforce_equivalence: bool = False,
         solver_timeout: int = 1,
+        preprocessor: Preprocessor | None = None,
     ):
         """
         Intializes an instance of Simplifier.
@@ -78,14 +78,16 @@ class Simplifier:
             oracle_path: File path to pre-computed simplification oracle.
             enforce_equivalence: Flag to enforce semantic equivalence checks before replacements.
             solver_timeout: SMT solver timeout in seconds.
+            preprocessor: Optional preprocessing pipeline applied before oracle simplification.
         """
         # public attributes
         self.oracle = SimplificationOracle.load_from_file(oracle_path)
         self.enforce_equivalence = enforce_equivalence
         self.solver_timeout = solver_timeout
+        extra_passes = None if preprocessor is None else preprocessor.passes
+        self.preprocessor = default_preprocessor(extra_passes)
 
         # internal attributes
-        self._translator_ast = AbstractSyntaxTreeTranslator()
         self._translator_z3 = TranslatorZ3()
         self._solver = z3.Solver()
         self._global_variable_prefix = "global_reg"
@@ -336,8 +338,8 @@ class Simplifier:
         Returns:
             Simplified expression
         """
-        # transform expr to abstract syntax tree
-        ast = self._translator_ast.from_expr(expr)
+        # transform expr to the preprocessed abstract syntax tree
+        ast = self.preprocessor.run(expr)
         # dictionary to map to placeholder variables to simplified subtrees
         global_unification_dict: Dict[Expr, Expr] = {}
         # placeholder variable counter

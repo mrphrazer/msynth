@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import os
 import json
 import math
@@ -24,14 +25,22 @@ from miasm.ir.translators.z3_ir import TranslatorZ3  # noqa: E402
 from msynth import Synthesizer  # noqa: E402
 from msynth.utils.expr_utils import get_subexpressions, parse_expr  # noqa: E402
 
-DEFAULT_CASE_FILE = REPO_ROOT / "data" / "synthesis_corpus" / "cases.jsonl"
-DEFAULT_REPORT_DIR = REPO_ROOT / "data" / "synthesis_corpus" / "reports"
+DEFAULT_CASE_FILE = REPO_ROOT / "datasets" / "corpora" / "synthesis.jsonl.gz"
+
+
+def open_text(path: Path, mode: str = "rt") -> Any:
+    if path.suffix == ".gz":
+        return gzip.open(path, mode, encoding="utf-8")
+    return path.open(mode.replace("t", ""), encoding="utf-8")
 
 
 @dataclass(frozen=True)
 class CorpusCase:
     id: str
-    expr_text: str
+    expr_repr: str
+    expected_expr_repr: str
+    source_expr_text: str
+    source_expected_text: str
     tags: tuple[str, ...]
     features: tuple[str, ...]
     samples: int
@@ -47,14 +56,19 @@ class CorpusCase:
         default_timeout: float,
         default_seeds: tuple[int, ...],
     ) -> "CorpusCase":
+        expr_repr = str(data["expr"])
+        expected_expr_repr = str(data.get("expected_expr", expr_repr))
         return cls(
             id=str(data["id"]),
-            expr_text=str(data["expr"]),
+            expr_repr=expr_repr,
+            expected_expr_repr=expected_expr_repr,
+            source_expr_text=str(data.get("expr_text", expr_repr)),
+            source_expected_text=str(data.get("expected_text", expected_expr_repr)),
             tags=tuple(str(tag) for tag in data.get("tags", ())),
             features=tuple(str(feature) for feature in data.get("features", ())),
-            samples=int(data.get("samples", default_samples)),
-            timeout=float(data.get("timeout", default_timeout)),
-            seeds=tuple(int(seed) for seed in data.get("seeds", default_seeds)),
+            samples=default_samples,
+            timeout=default_timeout,
+            seeds=default_seeds,
         )
 
 
@@ -67,7 +81,7 @@ def load_cases(
 ) -> list[CorpusCase]:
     cases: list[CorpusCase] = []
     seen_ids: set[str] = set()
-    with path.open("r", encoding="utf-8") as handle:
+    with open_text(path) as handle:
         for line_number, line in enumerate(handle, start=1):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -187,7 +201,7 @@ def run_attempt(case: CorpusCase, expr: Expr, seed: int) -> dict[str, Any]:
 
 def run_attempt_job(case: CorpusCase, seed: int) -> tuple[str, dict[str, Any]]:
     try:
-        expr = parse_expr(case.expr_text)
+        expr = parse_expr(case.expr_repr)
     except Exception as exc:
         return (
             case.id,
@@ -239,7 +253,10 @@ def summarize_case(
     return {
         "id": case.id,
         "status": status,
-        "expr": case.expr_text,
+        "expr": case.expr_repr,
+        "expected_expr": case.expected_expr_repr,
+        "expr_text": case.source_expr_text,
+        "expected_text": case.source_expected_text,
         "tags": list(case.tags),
         "features": list(case.features),
         "samples": case.samples,
@@ -264,12 +281,15 @@ def run_cases(cases: list[CorpusCase], jobs: int) -> list[dict[str, Any]]:
 
     for case in cases:
         try:
-            expr_by_id[case.id] = parse_expr(case.expr_text)
+            expr_by_id[case.id] = parse_expr(case.expr_repr)
         except Exception as exc:
             result_by_id[case.id] = {
                 "id": case.id,
                 "status": "error",
-                "expr": case.expr_text,
+                "expr": case.expr_repr,
+                "expected_expr": case.expected_expr_repr,
+                "expr_text": case.source_expr_text,
+                "expected_text": case.source_expected_text,
                 "tags": list(case.tags),
                 "features": list(case.features),
                 "samples": case.samples,
@@ -336,15 +356,18 @@ def build_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         statuses[result["status"]] = statuses.get(result["status"], 0) + 1
         total_time += sum(attempt["time_seconds"] for attempt in result["attempts"])
 
+    passed = statuses.get("solved", 0)
     return {
         "total": len(results),
+        "passed": passed,
+        "failed": len(results) - passed,
         "statuses": statuses,
         "time_seconds": round(total_time, 6),
     }
 
 
 def load_result_map(path: Path) -> dict[str, dict[str, Any]]:
-    with path.open("r", encoding="utf-8") as handle:
+    with open_text(path) as handle:
         report = json.load(handle)
     return {result["id"]: result for result in report.get("results", [])}
 
@@ -387,11 +410,6 @@ def compare_results(
     return comparison
 
 
-def default_report_path() -> Path:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    return DEFAULT_REPORT_DIR / f"report-{timestamp}.json"
-
-
 def display_path(path: Path) -> str:
     try:
         return str(path.resolve().relative_to(REPO_ROOT))
@@ -406,42 +424,79 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
         handle.write("\n")
 
 
-def print_summary(report: dict[str, Any]) -> None:
+def truncate(value: str | None, *, max_length: int = 500) -> str | None:
+    if value is not None and len(value) > max_length:
+        return f"{value[: max_length - 3]}..."
+    return value
+
+
+def format_failure(result: dict[str, Any]) -> str:
+    best_expr_ir = truncate(result.get("best_expr"))
+    best_expr = None
+    if result.get("best_expr") is not None:
+        try:
+            best_expr = str(parse_expr(result["best_expr"]))
+        except Exception:
+            best_expr = None
+    best_expr = truncate(best_expr)
+
+    first_error = next(
+        (
+            attempt.get("error")
+            for attempt in result["attempts"]
+            if attempt.get("error")
+        ),
+        None,
+    )
+    verification = next(
+        (
+            attempt.get("verification")
+            for attempt in result["attempts"]
+            if attempt.get("verification") is not None
+        ),
+        None,
+    )
+
+    lines = [
+        (
+            f"{result['id']} [{result['status']}] "
+            f"best_score={result['best_score']} "
+            f"solved_seeds={len(result['solved_seeds'])}/{len(result['seeds'])}"
+        ),
+        f"  expr:     {result['expr_text']}",
+        f"  expected: {result['expected_text']}",
+        f"  nodes:    {result['input_nodes']} -> {result['best_nodes']}",
+        f"  best_expr: {best_expr}",
+        f"  best_expr_ir: {best_expr_ir}",
+    ]
+    if verification is not None:
+        lines.append(
+            f"  verification: {verification['status']} {verification['detail']}"
+        )
+    if first_error is not None:
+        lines.append(f"  error: {first_error}")
+    return "\n".join(lines)
+
+
+def print_summary(report: dict[str, Any], *, max_failures: int) -> None:
     summary = report["summary"]
     statuses = summary["statuses"]
     print(
-        f"cases={summary['total']} "
+        f"checked={summary['total']} "
+        f"passed={summary['passed']} "
+        f"failed={summary['failed']} "
         f"solved={statuses.get('solved', 0)} "
         f"unsolved={statuses.get('unsolved', 0)} "
         f"mismatch={statuses.get('mismatch', 0)} "
         f"unverified={statuses.get('unverified', 0)} "
         f"error={statuses.get('error', 0)} "
-        f"attempt_time={summary['time_seconds']}s "
-        f"wall={summary['wall_time_seconds']}s"
+        f"jobs={report['jobs']} "
+        f"seconds={summary['wall_time_seconds']:.3f}"
     )
-    print()
-    print(f"{'status':<10} {'best':>12} {'seeds':<11} case")
-    print(f"{'-' * 10} {'-' * 12} {'-' * 11} {'-' * 32}")
-    for result in report["results"]:
-        seeds = f"{len(result['solved_seeds'])}/{len(result['seeds'])}"
-        print(
-            f"{result['status']:<10} "
-            f"{str(result['best_score']):>12} "
-            f"{seeds:<11} "
-            f"{result['id']}"
-        )
 
-    comparison = report.get("comparison")
-    if comparison:
-        print()
-        print(
-            "comparison "
-            f"improved={len(comparison['improved'])} "
-            f"regressed={len(comparison['regressed'])} "
-            f"changed={len(comparison['changed'])} "
-            f"new={len(comparison['new'])} "
-            f"removed={len(comparison['removed'])}"
-        )
+    failures = [result for result in report["results"] if result["status"] != "solved"]
+    for result in failures[:max_failures]:
+        print(format_failure(result), file=sys.stderr)
 
 
 def parse_args() -> argparse.Namespace:
@@ -453,7 +508,10 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         type=Path,
         default=DEFAULT_CASE_FILE,
-        help="JSONL corpus file. Defaults to data/synthesis_corpus/cases.jsonl.",
+        help=(
+            "JSONL or JSONL.GZ corpus file. Defaults to "
+            "datasets/corpora/synthesis.jsonl.gz."
+        ),
     )
     parser.add_argument(
         "--jobs",
@@ -483,70 +541,39 @@ def parse_args() -> argparse.Namespace:
         "--samples",
         type=int,
         default=16,
-        help="Default sample count for cases that do not specify samples.",
+        help="Sample count for every selected case.",
     )
     parser.add_argument(
         "--timeout",
         type=float,
         default=1.0,
-        help="Default per-seed timeout for cases that do not specify timeout.",
+        help="Per-seed timeout for every selected case.",
     )
     parser.add_argument(
         "--seed",
         action="append",
         type=int,
         default=[],
-        help="Default seed list for cases that do not specify seeds. Can be repeated.",
-    )
-    parser.add_argument(
-        "--override-samples",
-        type=int,
-        help="Override the sample count for every selected case.",
-    )
-    parser.add_argument(
-        "--override-timeout",
-        type=float,
-        help="Override the per-seed timeout for every selected case.",
-    )
-    parser.add_argument(
-        "--override-seed",
-        action="append",
-        type=int,
-        default=[],
-        help="Override the seed list for every selected case. Can be repeated.",
+        help="Seed list for every selected case. Can be repeated.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        help="Report path. Defaults to data/synthesis_corpus/reports/report-<timestamp>.json.",
+        required=True,
+        help="Report path to write.",
     )
     parser.add_argument(
         "--compare",
         type=Path,
         help="Compare current results against an existing report.",
     )
+    parser.add_argument(
+        "--max-failures",
+        type=int,
+        default=10,
+        help="Maximum number of failures printed to stderr. Defaults to 10.",
+    )
     return parser.parse_args()
-
-
-def apply_overrides(
-    cases: list[CorpusCase],
-    *,
-    samples: int | None,
-    timeout: float | None,
-    seeds: tuple[int, ...] | None,
-) -> list[CorpusCase]:
-    return [
-        CorpusCase(
-            id=case.id,
-            expr_text=case.expr_text,
-            tags=case.tags,
-            features=case.features,
-            samples=samples if samples is not None else case.samples,
-            timeout=timeout if timeout is not None else case.timeout,
-            seeds=seeds if seeds is not None else case.seeds,
-        )
-        for case in cases
-    ]
 
 
 def main() -> int:
@@ -568,14 +595,6 @@ def main() -> int:
     if not cases:
         raise SystemExit("No corpus cases selected.")
 
-    override_seeds = tuple(args.override_seed) if args.override_seed else None
-    cases = apply_overrides(
-        cases,
-        samples=args.override_samples,
-        timeout=args.override_timeout,
-        seeds=override_seeds,
-    )
-
     start_time = time.time()
     results = run_cases(cases, jobs=args.jobs)
     summary = build_summary(results)
@@ -592,13 +611,10 @@ def main() -> int:
     if args.compare:
         report["comparison"] = compare_results(args.compare, results)
 
-    output = args.output or default_report_path()
-    write_json(output, report)
+    write_json(args.output, report)
 
-    print_summary(report)
-    print()
-    print(f"wrote {output}")
-    return 0
+    print_summary(report, max_failures=max(0, args.max_failures))
+    return 0 if summary["failed"] == 0 else 1
 
 
 if __name__ == "__main__":
