@@ -9,7 +9,7 @@ import msynth.synthesis.oracle as synth_oracle
 
 
 def test_synthesis_oracle_from_expression(monkeypatch: pytest.MonkeyPatch) -> None:
-    # deterministic inputs for sampling
+    # deterministic random inputs after the fixed Smir/Xyntia-style samples
     seq = iter([1, 2, 3, 4, 5, 6])
 
     def fake_get_rand_input() -> int:
@@ -21,10 +21,10 @@ def test_synthesis_oracle_from_expression(monkeypatch: pytest.MonkeyPatch) -> No
     p1 = ExprId("p1", 8)
     expr = ExprOp("+", p0, p1)
     oracle = synth_oracle.SynthesisOracle.gen_from_expression(
-        expr, [p0, p1], num_samples=3
+        expr, [p0, p1], num_samples=6
     )
 
-    assert len(oracle.synthesis_map) == 3
+    assert len(oracle.synthesis_map) == 6
     for inputs, output in oracle.synthesis_map.items():
         replacements = {p0: inputs[0], p1: inputs[1]}
         expected = expr_simp(expr.replace_expr(replacements))
@@ -62,6 +62,21 @@ def test_synthesis_oracle_overwrites_duplicate_inputs(
 
     p0 = ExprId("p0", 8)
     expr = ExprOp("+", p0, ExprInt(1, 8))
-    oracle = synth_oracle.SynthesisOracle.gen_from_expression(expr, [p0], num_samples=3)
+    oracle = synth_oracle.SynthesisOracle.gen_from_expression(expr, [p0], num_samples=7)
 
-    assert len(oracle.synthesis_map) == 1
+    assert len(oracle.synthesis_map) == 5
+
+
+def test_synthesis_oracle_starts_with_fixed_samples() -> None:
+    p0 = ExprId("p0", 8)
+    expr = ExprOp("+", p0, ExprInt(1, 8))
+
+    oracle = synth_oracle.SynthesisOracle.gen_from_expression(expr, [p0], num_samples=5)
+
+    assert [int(inputs[0]) for inputs in oracle.synthesis_map] == [
+        0,
+        1,
+        0xFF,
+        0x7F,
+        0x80,
+    ]

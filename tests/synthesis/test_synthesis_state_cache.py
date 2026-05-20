@@ -3,7 +3,7 @@ from __future__ import annotations
 from miasm.expression.expression import ExprId, ExprInt, ExprOp
 
 from msynth.synthesis.oracle import SynthesisOracle
-import msynth.synthesis.state as synthesis_state
+import msynth.synthesis.scoring as synthesis_scoring
 from msynth.synthesis.state import SynthesisState
 
 
@@ -21,13 +21,13 @@ def test_state_compiled_cache_reused(monkeypatch) -> None:
 
     calls = {"count": 0}
 
-    real_compile = synthesis_state.compile_expr_to_python
+    real_compile = synthesis_scoring.compile_expr_to_python
 
     def counted_compile(e):
         calls["count"] += 1
         return real_compile(e)
 
-    monkeypatch.setattr(synthesis_state, "compile_expr_to_python", counted_compile)
+    monkeypatch.setattr(synthesis_scoring, "compile_expr_to_python", counted_compile)
 
     assert state.get_score(oracle, [p0, p1]) == 0.0
     assert state.get_score(oracle, [p0, p1]) == 0.0
@@ -50,6 +50,6 @@ def test_state_falls_back_when_compilation_fails(monkeypatch) -> None:
     def fail_compile(_e):
         raise ValueError("no compile")
 
-    monkeypatch.setattr(synthesis_state, "compile_expr_to_python", fail_compile)
+    monkeypatch.setattr(synthesis_scoring, "compile_expr_to_python", fail_compile)
 
     assert state.get_score(oracle, [p0, p1]) == 0.0

@@ -1,18 +1,53 @@
 import logging
 import multiprocessing
 import time
-from typing import Any, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, Sequence, Tuple, Union
 
 from miasm.expression.expression import Expr
 from msynth.synthesis.grammar import Grammar
 from msynth.synthesis.mutations import Mutator
 from msynth.synthesis.oracle import SynthesisOracle
+from msynth.synthesis.scoring import CompiledCache, score_expression
+from msynth.synthesis.smir import SmirEngine, SmirRule, default_smir_rules
 from msynth.synthesis.state import SynthesisState
 from msynth.utils.expr_utils import get_unique_variables
 from msynth.utils.parallelizer import Parallelizer
 from msynth.utils.unification import gen_unification_dict, reverse_unification
 
 logger = logging.getLogger("msynth.synthesizer")
+
+
+@dataclass(frozen=True)
+class SearchEvaluation:
+    best_expr: Expr
+    best_score: float
+    best_rule: str
+    aggregate_score: float
+
+
+class RawSearchEngine:
+    """
+    Scores the raw candidate expression without applying Smir rules.
+
+    This is used for `Synthesizer(use_smir=False)`. It keeps one local-search
+    driver in Synthesizer while making the opt-out mean exactly "do not infer
+    extra candidates from the current expression".
+    """
+
+    def __init__(self):
+        self.compiled_cache: CompiledCache = {}
+
+    def evaluate(
+        self, expr: Expr, oracle: SynthesisOracle, variables: list[Expr]
+    ) -> SearchEvaluation:
+        score = score_expression(expr, oracle, variables, self.compiled_cache)
+        return SearchEvaluation(
+            best_expr=expr,
+            best_score=score,
+            best_rule="raw",
+            aggregate_score=score,
+        )
 
 
 class Synthesizer:
@@ -45,6 +80,31 @@ class Synthesizer:
     with i inputs. Based on this expression, synthesis oracle, grammar and mutator
     will be automatically initialized. The synthesis can also be processed in parallel.
     """
+
+    def __init__(
+        self,
+        use_smir: bool = True,
+        smir_rules: Sequence[SmirRule] | None = None,
+        polynomial_degree: int = 2,
+    ):
+        """
+        Initialize the stochastic synthesizer.
+
+        Args:
+            use_smir: Enable Search Modulo Inference Rules by default. When
+                disabled, synthesis uses the same local-search driver with raw
+                candidate scoring only.
+            smir_rules: Optional ordered Smir rule list. The order matters when
+                multiple inferred candidates match the oracle with score 0.0.
+            polynomial_degree: Maximum polynomial degree for the default Smir
+                polynomial rule.
+        """
+        self.use_smir = use_smir
+        self.smir_rules = (
+            list(smir_rules)
+            if smir_rules is not None
+            else default_smir_rules(polynomial_degree)
+        )
 
     def synthesize_from_expression(
         self, expr: Expr, num_samples: int, timeout: Union[int, float] = 60
@@ -208,58 +268,60 @@ class Synthesizer:
         Returns:
             Tuple[SynthesisState, float]: Best synthesis state and its score.
         """
+        search_engine = (
+            SmirEngine(self.smir_rules) if self.use_smir else RawSearchEngine()
+        )
+
         # init states
         current_state = SynthesisState(*mutator.grammar.gen_terminal_for_state())
-        current_score = float("inf")
+        current_eval = search_engine.evaluate(
+            current_state.get_expr(), oracle, mutator.grammar.variables
+        )
 
-        best_state = current_state.clone()
-        best_score = float("inf")
+        best_expr = current_eval.best_expr
+        best_score = current_eval.best_score
+        best_rule = current_eval.best_rule
+        if best_score == 0.0:
+            return SynthesisState(best_expr), best_score
 
         # init iterations and time
         iteration = 0
+        change_counter = 0
         start_time = time.time()
 
-        # start ILS
         while time.time() - start_time < timeout:
-            # perturbation
-            current_state = mutator.replace_subexpression_with_leaf(current_state)
+            iteration += 1
 
-            # side search
-            change_counter = 0
-            while change_counter < 100 and time.time() - start_time < timeout:
-                iteration += 1
+            proposed_state = mutator.mutate(current_state.clone())
+            proposed_eval = search_engine.evaluate(
+                proposed_state.get_expr(), oracle, mutator.grammar.variables
+            )
 
-                # mutate and score
-                proposed_state = mutator.mutate(current_state)
-                proposed_score = proposed_state.get_score(
-                    oracle, mutator.grammar.variables
-                )
+            # Algorithm 3 from the Smir paper accepts a mutation if the product
+            # of inferred-candidate scores improves. After a stagnation window,
+            # it accepts a mutation anyway to escape a local minimum.
+            if (
+                proposed_eval.aggregate_score < current_eval.aggregate_score
+                or change_counter >= 100
+            ):
+                current_state = proposed_state.clone()
+                current_eval = proposed_eval
+                change_counter = 0
 
-                # the proposed state is better
-                if proposed_score < current_score:
-                    # reset counter
-                    change_counter = 0
+                if proposed_eval.best_score < best_score:
+                    best_expr = proposed_eval.best_expr
+                    best_score = proposed_eval.best_score
+                    best_rule = proposed_eval.best_rule
+                    logger.info(
+                        f"best Smir expression: {best_expr} "
+                        f"(rule: {best_rule}) "
+                        f"(score: {best_score}) "
+                        f"(iteration: {iteration})"
+                    )
 
-                    # update current state
-                    current_state = proposed_state.clone()
-                    current_score = proposed_score
-
-                    # update best state
-                    if proposed_score < best_score:
-                        best_state = proposed_state.clone()
-                        best_score = proposed_score
-                        logger.info(
-                            f"best state: {best_state.get_expr()} (score: {best_score}) (iteration: {iteration})"
-                        )
-
-                    # return if perfect result found
-                    if best_score == 0.0:
-                        return best_state, best_score
-
-                # update change counter
+                if best_score == 0.0:
+                    return SynthesisState(best_expr), best_score
+            else:
                 change_counter += 1
 
-            # use best state for perturbation
-            current_state = best_state.clone()
-
-        return best_state, best_score
+        return SynthesisState(best_expr), best_score

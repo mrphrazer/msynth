@@ -66,23 +66,15 @@ class SynthesisOracle:
         Returns:
             SynthesisOracle: Generated SynthesisOracle instance.
         """
-        # init map
         synthesis_map = {}
 
-        # walk over number of samples
-        for _ in range(num_samples):
-            # list of inputs
+        for raw_inputs in _gen_sample_inputs(variables, num_samples):
             inputs = []
-            # dictionary of expression replacements
             replacements = {}
-            # walk over all variables
-            for v in variables:
-                # generate a random value
-                value = get_rand_input()
-                # replace variable with random value
-                replacements[v] = ExprInt(value, v.size)
-                # add random value to list of inputs
-                inputs.append(ExprInt(value, v.size))
+            for variable, value in zip(variables, raw_inputs):
+                concrete = ExprInt(value, variable.size)
+                replacements[variable] = concrete
+                inputs.append(concrete)
 
             # evaluate expression to obtain output
             result = expr_simp(expr.replace_expr(replacements))
@@ -95,3 +87,41 @@ class SynthesisOracle:
             synthesis_map[tuple(inputs)] = result
 
         return SynthesisOracle(synthesis_map)
+
+
+def _gen_sample_inputs(variables: List[Expr], num_samples: int) -> List[List[int]]:
+    """
+    Generate paper-style fixed samples first, then random samples.
+
+    Smir/Xyntia use fixed vectors for common boundary values before random I/O
+    examples. For mixed-size expressions, each variable receives the boundary
+    value masked to its own width.
+    """
+    samples = []
+
+    for fixed_index in range(min(num_samples, 5)):
+        samples.append(
+            [
+                _fixed_value_for_index(variable.size, fixed_index)
+                for variable in variables
+            ]
+        )
+
+    for _ in range(max(0, num_samples - len(samples))):
+        samples.append([get_rand_input() for _variable in variables])
+
+    return samples
+
+
+def _fixed_value_for_index(size: int, index: int) -> int:
+    if index == 0:
+        return 0
+    if index == 1:
+        return 1
+    if index == 2:
+        return (1 << size) - 1
+    if index == 3:
+        return (1 << (size - 1)) - 1
+    if index == 4:
+        return 1 << (size - 1)
+    raise ValueError(f"Unsupported fixed sample index: {index}")

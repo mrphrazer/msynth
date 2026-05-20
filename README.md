@@ -11,6 +11,8 @@ msynth is built on top of [Miasm](https://github.com/cea-sec/miasm) and inspired
 
 * ["Search-Based Local Blackbox Deobfuscation: Understand, Improve and Mitigate"](https://binsec.github.io/assets/publications/papers/2021-ccs.pdf) by Grégoire Menguy, Sébastien Bardin, Richard Bonichon and Cauim de Souza de Lima (CCS 2021).
 
+* ["Augmenting Search-based Program Synthesis with Local Inference Rules to Improve Black-box Deobfuscation"](https://binsec.github.io/assets/publications/papers/2025-ccs.pdf) by Vidal Attias, Nicolas Bellec, Grégoire Menguy, Sébastien Bardin and Jean-Yves Marion (CCS 2025).
+
 
 It can be used in combination with Miasm's symbolic execution engine to simplify complex expressions in obfuscated code or as a standalone tool to play around with MBA simplification.
 
@@ -70,6 +72,8 @@ The example database included in [database](/database/) contains all 1,293,020 c
 ## Stochastic Program Synthesis
 
 As an alternative to pre-computed lookup tables, msynth supports expression simplification via stochastic program synthesis. For a given complex arithmetic expression, msynth can learn a shorter expression that shares the same input-output behavior. For now, it is implemented as a stand-alone component. However, we plan to combine both simplification approaches in future.
+
+The synthesis path also uses Search Modulo Inference Rules (Smir) by default, following the CCS 2025 paper linked above. Smir augments local search by deriving nearby candidates for hard-to-synthesize patterns such as arbitrary constants, masks, constant shifts and rotations, affine expressions, and bounded polynomial expressions.
 
 ## Example Usage
 
