@@ -19,7 +19,7 @@ def test_synthesize_from_expression_reapplies_unification(monkeypatch) -> None:
     monkeypatch.setattr(synth_oracle, "get_rand_input", fake_get_rand_input)
 
     expr = ExprId("x", 8)
-    synth = Synthesizer()
+    synth = Synthesizer(use_smir=False)
 
     def fake_ils(_mutator, _oracle):
         return SynthesisState(ExprId("p0", 8)), 0.0
