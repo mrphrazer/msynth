@@ -20,7 +20,9 @@ def test_synthesis_oracle_from_expression(monkeypatch: pytest.MonkeyPatch) -> No
     p0 = ExprId("p0", 8)
     p1 = ExprId("p1", 8)
     expr = ExprOp("+", p0, p1)
-    oracle = synth_oracle.SynthesisOracle.gen_from_expression(expr, [p0, p1], num_samples=3)
+    oracle = synth_oracle.SynthesisOracle.gen_from_expression(
+        expr, [p0, p1], num_samples=3
+    )
 
     assert len(oracle.synthesis_map) == 3
     for inputs, output in oracle.synthesis_map.items():
@@ -34,7 +36,9 @@ def test_synthesis_oracle_rejects_empty_map() -> None:
         synth_oracle.SynthesisOracle({})
 
 
-def test_synthesis_oracle_requires_exprint_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_synthesis_oracle_requires_exprint_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # force expr_simp to return a non-int expression to trigger the type check.
     def fake_expr_simp(_expr):
         return ExprId("x", 8)
@@ -48,7 +52,9 @@ def test_synthesis_oracle_requires_exprint_outputs(monkeypatch: pytest.MonkeyPat
         synth_oracle.SynthesisOracle.gen_from_expression(expr, [p0], num_samples=1)
 
 
-def test_synthesis_oracle_overwrites_duplicate_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_synthesis_oracle_overwrites_duplicate_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def fake_get_rand_input() -> int:
         return 1
 

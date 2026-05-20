@@ -52,7 +52,9 @@ def test_parallelizer_records_first_success(monkeypatch) -> None:
         (worker_none, "group1"),
     ]
 
-    monkeypatch.setattr("msynth.utils.parallelizer.multiprocessing", _FakeMultiprocessing())
+    monkeypatch.setattr(
+        "msynth.utils.parallelizer.multiprocessing", _FakeMultiprocessing()
+    )
     parallelizer = Parallelizer(tasks, max_processes=1)
     results = parallelizer.execute()
 
@@ -67,7 +69,9 @@ def test_parallelizer_no_success_results_empty(monkeypatch) -> None:
         (worker_none, "group1"),
     ]
 
-    monkeypatch.setattr("msynth.utils.parallelizer.multiprocessing", _FakeMultiprocessing())
+    monkeypatch.setattr(
+        "msynth.utils.parallelizer.multiprocessing", _FakeMultiprocessing()
+    )
     parallelizer = Parallelizer(tasks, max_processes=1)
     results = parallelizer.execute()
 

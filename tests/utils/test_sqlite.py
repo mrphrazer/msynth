@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 from miasm.expression.expression import ExprId
 
-from msynth.utils.sqlite import NotSqliteOracleError, SqliteOracleMap, dump_sqlite_oracle_data, load_sqlite_oracle_data
+from msynth.utils.sqlite import (
+    NotSqliteOracleError,
+    SqliteOracleMap,
+    dump_sqlite_oracle_data,
+    load_sqlite_oracle_data,
+)
 
 
 def test_sqlite_roundtrip_and_map_access(tmp_path: Path) -> None:

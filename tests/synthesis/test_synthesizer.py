@@ -10,7 +10,9 @@ def test_simplify_returns_synthesized_on_zero_score(monkeypatch) -> None:
     synth = Synthesizer()
     synthesized = ExprInt(7, 8)
 
-    monkeypatch.setattr(synth, "synthesize_from_expression", lambda _expr, _n: (synthesized, 0.0))
+    monkeypatch.setattr(
+        synth, "synthesize_from_expression", lambda _expr, _n: (synthesized, 0.0)
+    )
 
     assert synth.simplify(expr, num_samples=2) == synthesized
 
@@ -20,7 +22,9 @@ def test_simplify_returns_original_on_nonzero_score(monkeypatch) -> None:
     synth = Synthesizer()
     synthesized = ExprInt(7, 8)
 
-    monkeypatch.setattr(synth, "synthesize_from_expression", lambda _expr, _n: (synthesized, 1.0))
+    monkeypatch.setattr(
+        synth, "synthesize_from_expression", lambda _expr, _n: (synthesized, 1.0)
+    )
 
     assert synth.simplify(expr, num_samples=2) == expr
 
@@ -42,7 +46,9 @@ def test_synthesize_from_expression_parallel_returns_first_success(monkeypatch) 
     monkeypatch.setattr(synth, "synthesize_from_expression", fake_synthesize)
     monkeypatch.setattr("msynth.synthesis.synthesizer.Parallelizer", FakeParallelizer)
 
-    result_expr, result_score = synth.synthesize_from_expression_parallel(expr, num_samples=2)
+    result_expr, result_score = synth.synthesize_from_expression_parallel(
+        expr, num_samples=2
+    )
 
     assert result_expr == ExprInt(7, 8)
     assert result_score == 0.0

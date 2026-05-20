@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from miasm.expression.expression import ExprId, ExprLoc, ExprMem, ExprOp, LocKey
 
-from msynth.utils.unification import gen_unification_dict, invert_dict, reverse_unification
+from msynth.utils.unification import (
+    gen_unification_dict,
+    invert_dict,
+    reverse_unification,
+)
 
 
 def test_invert_dict() -> None:

@@ -221,31 +221,73 @@ def build_cases() -> List[Dict[str, Any]]:
 
     # additional size variants and signed/unsigned comparisons
     add_case("add_8", ExprOp("+", p0_8, p1_8), [0x12, 0x34])
-    add_case("add_16", ExprOp("+", ExprId("p0", 16), ExprId("p1", 16)), [0x1234, 0x00FF])
+    add_case(
+        "add_16", ExprOp("+", ExprId("p0", 16), ExprId("p1", 16)), [0x1234, 0x00FF]
+    )
     add_case("sub_8", ExprOp("-", p0_8, p1_8), [0x01, 0x02])
-    add_case("mul_16", ExprOp("*", ExprId("p0", 16), ExprId("p1", 16)), [0x00FF, 0x0003])
+    add_case(
+        "mul_16", ExprOp("*", ExprId("p0", 16), ExprId("p1", 16)), [0x00FF, 0x0003]
+    )
     add_case("and_8", ExprOp("&", p0_8, p1_8), [0xF0, 0x0F])
     add_case("or_16", ExprOp("|", ExprId("p0", 16), ExprId("p1", 16)), [0xF0F0, 0x0FF0])
-    add_case("xor_64", ExprOp("^", p0_64, p1_64), [0xFFFF_FFFF_0000_0000, 0x0000_0000_FFFF_FFFF])
+    add_case(
+        "xor_64",
+        ExprOp("^", p0_64, p1_64),
+        [0xFFFF_FFFF_0000_0000, 0x0000_0000_FFFF_FFFF],
+    )
     add_case("add_64", ExprOp("+", p0_64, p1_64), [0x7FFF_FFFF_FFFF_FFFF, 0x1])
     add_case("sub_64", ExprOp("-", p0_64, p1_64), [0x0, 0x1])
     add_case("mul_64", ExprOp("*", p0_64, p1_64), [0x1234_5678_9ABC_DEF0, 0x10])
-    add_case("and_64", ExprOp("&", p0_64, p1_64), [0xFFFF_0000_FFFF_0000, 0x0FFF_FFFF_0FFF_FFFF])
-    add_case("or_64", ExprOp("|", p0_64, p1_64), [0x8000_0000_0000_0000, 0x7FFF_FFFF_FFFF_FFFF])
+    add_case(
+        "and_64",
+        ExprOp("&", p0_64, p1_64),
+        [0xFFFF_0000_FFFF_0000, 0x0FFF_FFFF_0FFF_FFFF],
+    )
+    add_case(
+        "or_64",
+        ExprOp("|", p0_64, p1_64),
+        [0x8000_0000_0000_0000, 0x7FFF_FFFF_FFFF_FFFF],
+    )
     add_case("shl_64", ExprOp("<<", p0_64, ExprInt(5, 64)), [0x1234_5678_9ABC_DEF0, 0])
     add_case("shr_64", ExprOp(">>", p0_64, ExprInt(5, 64)), [0x8000_0000_0000_0000, 0])
-    add_case("ashr_64", ExprOp("a>>", p0_64, ExprInt(5, 64)), [0x8000_0000_0000_0000, 0])
-    add_case("rotl_64", ExprOp("<<<", p0_64, ExprInt(17, 64)), [0x1234_5678_9ABC_DEF0, 0])
-    add_case("rotr_64", ExprOp(">>>", p0_64, ExprInt(17, 64)), [0x1234_5678_9ABC_DEF0, 0])
+    add_case(
+        "ashr_64", ExprOp("a>>", p0_64, ExprInt(5, 64)), [0x8000_0000_0000_0000, 0]
+    )
+    add_case(
+        "rotl_64", ExprOp("<<<", p0_64, ExprInt(17, 64)), [0x1234_5678_9ABC_DEF0, 0]
+    )
+    add_case(
+        "rotr_64", ExprOp(">>>", p0_64, ExprInt(17, 64)), [0x1234_5678_9ABC_DEF0, 0]
+    )
     add_case("eq_64", ExprOp("==", p0_64, p1_64), [0x1234, 0x1234])
     add_case("lt_u_64", ExprOp("<u", p0_64, p1_64), [0x1, 0x2])
     add_case("lte_u_64", ExprOp("<=u", p0_64, p1_64), [0x2, 0x2])
-    add_case("lt_s_64_neg", ExprOp("<s", ExprInt(0xFFFF_FFFF_FFFF_FFFF, 64), ExprInt(1, 64)), [0, 0])
-    add_case("lte_s_64_eq", ExprOp("<=s", ExprInt(0x8000_0000_0000_0000, 64), ExprInt(0x8000_0000_0000_0000, 64)), [0, 0])
+    add_case(
+        "lt_s_64_neg",
+        ExprOp("<s", ExprInt(0xFFFF_FFFF_FFFF_FFFF, 64), ExprInt(1, 64)),
+        [0, 0],
+    )
+    add_case(
+        "lte_s_64_eq",
+        ExprOp(
+            "<=s",
+            ExprInt(0x8000_0000_0000_0000, 64),
+            ExprInt(0x8000_0000_0000_0000, 64),
+        ),
+        [0, 0],
+    )
     add_case("udiv_64", ExprOp("udiv", ExprInt(10, 64), ExprInt(3, 64)), [0, 0])
     add_case("umod_64", ExprOp("umod", ExprInt(10, 64), ExprInt(3, 64)), [0, 0])
-    add_case("sdiv_64", ExprOp("sdiv", ExprInt(0xFFFF_FFFF_FFFF_FFF7, 64), ExprInt(3, 64)), [0, 0])
-    add_case("smod_64", ExprOp("smod", ExprInt(0xFFFF_FFFF_FFFF_FFF7, 64), ExprInt(3, 64)), [0, 0])
+    add_case(
+        "sdiv_64",
+        ExprOp("sdiv", ExprInt(0xFFFF_FFFF_FFFF_FFF7, 64), ExprInt(3, 64)),
+        [0, 0],
+    )
+    add_case(
+        "smod_64",
+        ExprOp("smod", ExprInt(0xFFFF_FFFF_FFFF_FFF7, 64), ExprInt(3, 64)),
+        [0, 0],
+    )
     add_case("shl_8", ExprOp("<<", p0_8, ExprInt(3, 8)), [0x12, 0])
     add_case("shr_8", ExprOp(">>", p0_8, ExprInt(3, 8)), [0x80, 0])
     add_case("ashr_8", ExprOp("a>>", p0_8, ExprInt(3, 8)), [0x80, 0])
@@ -262,9 +304,19 @@ def build_cases() -> List[Dict[str, Any]]:
     add_case("smod_8", ExprOp("smod", ExprInt(0xF7, 8), ExprInt(0x03, 8)), [0, 0])
     add_case("slice_1bit", ExprSlice(p0_32, 0, 1), [0x1, 0])
     add_case("slice_highbit", ExprSlice(p0_32, 31, 32), [0x80000000, 0])
-    add_case("compose_4x4", ExprCompose(ExprSlice(p0_8, 0, 4), ExprSlice(p0_8, 4, 8)), [0xAB, 0])
-    add_case("cond_true", ExprCond(ExprInt(1, 1), ExprInt(0x12, 8), ExprInt(0x34, 8)), [0, 0])
-    add_case("cond_false", ExprCond(ExprInt(0, 1), ExprInt(0x12, 8), ExprInt(0x34, 8)), [0, 0])
+    add_case(
+        "compose_4x4",
+        ExprCompose(ExprSlice(p0_8, 0, 4), ExprSlice(p0_8, 4, 8)),
+        [0xAB, 0],
+    )
+    add_case(
+        "cond_true", ExprCond(ExprInt(1, 1), ExprInt(0x12, 8), ExprInt(0x34, 8)), [0, 0]
+    )
+    add_case(
+        "cond_false",
+        ExprCond(ExprInt(0, 1), ExprInt(0x12, 8), ExprInt(0x34, 8)),
+        [0, 0],
+    )
 
     return cases
 
@@ -326,9 +378,7 @@ def test_compile_compose_and_slice_edges() -> None:
     p0_32 = ExprId("p0", 32)
     p1_32 = ExprId("p1", 32)
     expr_full_slice = ExprSlice(p0_32, 0, 32)
-    expr_compose = ExprCompose(
-        ExprSlice(p0_32, 0, 16), ExprSlice(p1_32, 0, 16)
-    )
+    expr_compose = ExprCompose(ExprSlice(p0_32, 0, 16), ExprSlice(p1_32, 0, 16))
     inputs = [0xA5A5A5A5, 0x5A5A5A5A]
     func_slice = compile_expr_to_python(expr_full_slice)
     func_comp = compile_expr_to_python(expr_compose)
@@ -485,6 +535,7 @@ def test_compile_randomized_ext_ops() -> None:
         for expr in [zero_expr, sign_expr]:
             func = compile_expr_to_python(expr)
             assert func([0]) == miasm_eval(expr, [0])
+
 
 def test_compile_shared_subexpression_or_chain() -> None:
     expr = ExprId("p0", 32)

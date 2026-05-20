@@ -8,7 +8,9 @@ from msynth.synthesis.mutations import Mutator
 from msynth.synthesis.state import SynthesisState
 
 
-def test_replace_subexpression_with_expression_noop_on_size_mismatch(monkeypatch) -> None:
+def test_replace_subexpression_with_expression_noop_on_size_mismatch(
+    monkeypatch,
+) -> None:
     p0 = ExprId("p0", 8)
     p1 = ExprId("p1", 8)
     expr = ExprOp("+", p0, p1)

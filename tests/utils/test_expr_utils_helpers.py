@@ -1,8 +1,22 @@
 from __future__ import annotations
 
-from miasm.expression.expression import ExprCompose, ExprCond, ExprId, ExprInt, ExprLoc, ExprMem, ExprOp, LocKey
+from miasm.expression.expression import (
+    ExprCompose,
+    ExprCond,
+    ExprId,
+    ExprInt,
+    ExprLoc,
+    ExprMem,
+    ExprOp,
+    LocKey,
+)
 
-from msynth.utils.expr_utils import get_subexpressions, get_unification_candidates, get_unique_variables, parse_expr
+from msynth.utils.expr_utils import (
+    get_subexpressions,
+    get_unification_candidates,
+    get_unique_variables,
+    parse_expr,
+)
 
 
 def test_parse_expr_roundtrip_complex() -> None:

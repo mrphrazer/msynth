@@ -57,7 +57,9 @@ def test_mutator_downcast_expression_adds_mask(monkeypatch) -> None:
     assert isinstance(mutated.expr_ast.args[1], ExprInt)
 
 
-def test_mutator_replace_subexpression_with_expression_size_mismatch(monkeypatch) -> None:
+def test_mutator_replace_subexpression_with_expression_size_mismatch(
+    monkeypatch,
+) -> None:
     p0 = ExprId("p0", 8)
     p1 = ExprId("p1", 8)
     grammar = Grammar(8, [p0, p1])
