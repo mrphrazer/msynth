@@ -12,9 +12,12 @@ from miasm.expression.expression import (
 )
 
 from msynth.utils.expr_utils import (
+    bounded_tree_size,
     get_subexpressions,
     get_unification_candidates,
     get_unique_variables,
+    is_strictly_smaller_tree,
+    iter_child_expressions,
     parse_expr,
 )
 
@@ -65,3 +68,38 @@ def test_get_subexpressions_includes_root() -> None:
     assert expr in subs
     assert a in subs
     assert b in subs
+
+
+def test_iter_child_expressions_covers_common_miasm_shapes() -> None:
+    x = ExprId("x", 8)
+    y = ExprId("y", 8)
+    cond = ExprCond(ExprId("c", 1), x, y)
+    mem = ExprMem(x, 8)
+    composed = ExprCompose(x, y)
+
+    assert iter_child_expressions(ExprOp("+", x, y)) == (x, y)
+    assert iter_child_expressions(cond) == (cond.cond, x, y)
+    assert iter_child_expressions(mem) == (x,)
+    assert iter_child_expressions(composed) == (x, y)
+
+
+def test_bounded_tree_size_stops_at_limit() -> None:
+    x = ExprId("x", 8)
+    expr = ExprOp("+", ExprOp("+", x, ExprInt(1, 8)), ExprInt(2, 8))
+
+    assert bounded_tree_size(expr, 10) == 5
+    assert bounded_tree_size(expr, 3) == 3
+
+
+def test_is_strictly_smaller_tree_uses_bounded_candidate_count() -> None:
+    x = ExprId("x", 8)
+    original = ExprOp("+", ExprOp("&", x, ExprInt(1, 8)), ExprOp("|", x, ExprInt(2, 8)))
+    smaller = x
+    same_size = ExprOp("^", x, ExprInt(1, 8))
+    larger = ExprOp(
+        "*", x, ExprOp("^", ExprOp("<<", ExprInt(2, 8), -x), ExprInt(0xFF, 8))
+    )
+
+    assert is_strictly_smaller_tree(smaller, original)
+    assert not is_strictly_smaller_tree(same_size, same_size)
+    assert not is_strictly_smaller_tree(larger, same_size)

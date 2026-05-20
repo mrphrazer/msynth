@@ -102,14 +102,53 @@ def test_is_suitable_simplification_candidate_accepts_unknown_without_enforce(
 ) -> None:
     simplifier = Simplifier(_write_min_oracle(tmp_path), enforce_equivalence=False)
 
-    expr = ExprOp("+", ExprId("x", 8), ExprInt(1, 8))
-    simplified = ExprOp("^", ExprId("x", 8), ExprInt(1, 8))
+    x = ExprId("x", 8)
+    y = ExprId("y", 8)
+    expr = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
+    simplified = ExprOp("+", x, y)
 
     monkeypatch.setattr(
         simplifier, "check_semantical_equivalence", lambda _a, _b: z3.unknown
     )
 
     assert simplifier._is_suitable_simplification_candidate(expr, simplified)
+
+
+def test_is_suitable_simplification_candidate_rejects_larger_candidate(
+    tmp_path: Path, monkeypatch
+) -> None:
+    simplifier = Simplifier(_write_min_oracle(tmp_path), enforce_equivalence=False)
+
+    x = ExprId("x", 8)
+    expr = ExprOp("^", x, ExprOp("^", x, ExprOp("-", x)))
+    simplified = ExprOp(
+        "*",
+        x,
+        ExprOp("^", ExprOp("<<", ExprInt(2, 8), ExprOp("-", x)), ExprInt(0xFF, 8)),
+    )
+
+    monkeypatch.setattr(
+        simplifier, "check_semantical_equivalence", lambda _a, _b: z3.unknown
+    )
+
+    assert not simplifier._is_suitable_simplification_candidate(expr, simplified)
+
+
+def test_is_suitable_simplification_candidate_rejects_unknown_counterexample(
+    tmp_path: Path, monkeypatch
+) -> None:
+    simplifier = Simplifier(_write_min_oracle(tmp_path), enforce_equivalence=False)
+
+    x = ExprId("x", 8)
+    y = ExprId("y", 8)
+    expr = ExprOp("+", x, y)
+    simplified = x
+
+    monkeypatch.setattr(
+        simplifier, "check_semantical_equivalence", lambda _a, _b: z3.unknown
+    )
+
+    assert not simplifier._is_suitable_simplification_candidate(expr, simplified)
 
 
 def test_is_suitable_simplification_candidate_rejects_sat(

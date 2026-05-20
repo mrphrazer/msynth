@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import List
 
 import pytest
+from miasm.expression.expression import ExprId, ExprInt, ExprOp
 
 import msynth.utils.sampling as sampling
 
@@ -69,3 +70,49 @@ def test_gen_inputs_array_uses_get_rand_input(monkeypatch: pytest.MonkeyPatch) -
 def test_gen_inputs_edge_cases() -> None:
     assert sampling.gen_inputs(num_variables=0, num_samples=3) == [[], [], []]
     assert sampling.gen_inputs(num_variables=2, num_samples=0) == []
+
+
+def test_gen_adversarial_values_includes_wraparound_tail() -> None:
+    values = sampling.gen_adversarial_values(8)
+
+    assert 0 in values
+    assert 1 in values
+    assert 64 in values
+    assert 0xFF in values
+    assert 0xFE in values
+    assert 0xC0 in values
+
+
+def test_gen_adversarial_inputs_is_linear_in_variables() -> None:
+    x = ExprId("x", 8)
+    y = ExprId("y", 8)
+
+    inputs = sampling.gen_adversarial_inputs([x, y])
+
+    assert [] not in inputs
+    assert [0, 0] in inputs
+    assert [1, 1] in inputs
+    assert [0xFF, 0] in inputs
+    assert [1, 0xFF] in inputs
+
+
+def test_has_adversarial_counterexample_catches_shift_collision() -> None:
+    x = ExprId("x", 8)
+    expr = ExprOp("^", x, ExprOp("^", x, ExprOp("-", x)))
+    candidate = ExprOp(
+        "*",
+        x,
+        ExprOp("^", ExprOp("<<", ExprInt(2, 8), ExprOp("-", x)), ExprInt(0xFF, 8)),
+    )
+
+    assert sampling.has_adversarial_counterexample(expr, candidate)
+
+
+def test_has_adversarial_counterexample_returns_false_when_samples_match() -> None:
+    x = ExprId("x", 8)
+    y = ExprId("y", 8)
+
+    assert not sampling.has_adversarial_counterexample(
+        ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y)),
+        ExprOp("+", x, y),
+    )
