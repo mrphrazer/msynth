@@ -238,11 +238,12 @@ class Simplifier:
            can be matched to a terminal expression in the original one.
 
 
-        2. If Miasm's expression simplification results in the same expression for
-           the original and the simplified one. In this case, the lookup in the
-           simplification oracle is not required.
+        2. If the simplification candidate is not structurally smaller than the
+           original expression after reverse unification. This rejects no-op,
+           equal-size, and larger replacements while still allowing candidates
+           that Miasm can normalize to the same expression as the original.
 
-        3. If the original expression is semantically equivalent to the simplified one.
+        3. If the original expression is not semantically equivalent to the simplified one.
            Since this query is computationally expensive, we, by default, set a small
            timeout and check only if the SMT solver is not able to find a proof for
            inequivalence in the provided time. If the solver was not able to proof
@@ -263,9 +264,6 @@ class Simplifier:
         if any(
             [re.search("^p[0-9]*", v.name) for v in get_unique_variables(simplified)]
         ):
-            return False
-        # same normalized expression
-        if not simplified.is_int() and expr_simp(expr) == expr_simp(simplified):
             return False
         # Reject concrete size regressions before doing SMT work. The helper is
         # intentionally bounded and iterative because Miasm graph construction can

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import z3
 from miasm.expression.expression import ExprId, ExprInt, ExprLoc, ExprOp, LocKey
+from miasm.expression.simplifications import expr_simp
 
 from msynth.simplification.oracle import SimplificationOracle
 from msynth.simplification.simplifier import Simplifier
@@ -132,6 +133,28 @@ def test_is_suitable_simplification_candidate_rejects_larger_candidate(
     )
 
     assert not simplifier._is_suitable_simplification_candidate(expr, simplified)
+
+
+def test_is_suitable_simplification_candidate_accepts_smaller_normalized_equivalent(
+    tmp_path: Path,
+) -> None:
+    simplifier = Simplifier(_write_min_oracle(tmp_path), enforce_equivalence=True)
+
+    x = ExprId("x", 64)
+    y = ExprId("y", 64)
+    expr = ExprOp(
+        "&",
+        x,
+        ExprOp(
+            "+",
+            x,
+            ExprOp("-", ExprOp("+", x, ExprOp("-", ExprOp("&", x, y)))),
+        ),
+    )
+    simplified = ExprOp("&", x, y)
+
+    assert expr_simp(expr) == expr_simp(simplified)
+    assert simplifier._is_suitable_simplification_candidate(expr, simplified)
 
 
 def test_is_suitable_simplification_candidate_rejects_unknown_counterexample(
