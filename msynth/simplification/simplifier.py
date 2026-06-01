@@ -89,8 +89,6 @@ class Simplifier:
         cegis_validation_samples: int = 16,
         cegis_expand_templates: bool = True,
         cegis_expansion_budget: int = 40,
-        cegis_harvest_templates: bool = True,
-        cegis_harvest_max_placeholders: int = 2,
     ):
         """
         Intializes an instance of Simplifier.
@@ -130,11 +128,6 @@ class Simplifier:
                 light constant decorations (``+c``, ``^c``, ``(&c)|c'``) to
                 broaden coverage without manual enumeration.
             cegis_expansion_budget: Cap on total expanded templates.
-            cegis_harvest_templates: When True, generalise successful
-                CEGIS candidates back into the runtime template oracle so
-                later subtrees can hit the harvested shape directly.
-            cegis_harvest_max_placeholders: Cap on placeholders allowed in
-                a harvested template.
         """
         # public attributes
         self.oracle = SimplificationOracle.load_from_file(oracle_path)
@@ -168,8 +161,6 @@ class Simplifier:
                 validation_samples=cegis_validation_samples,
                 expand_templates=cegis_expand_templates,
                 expansion_budget=cegis_expansion_budget,
-                harvest_templates=cegis_harvest_templates,
-                harvest_max_placeholders=cegis_harvest_max_placeholders,
             )
 
     def check_semantical_equivalence(self, f1: Expr, f2: Expr) -> z3.CheckSatResult:

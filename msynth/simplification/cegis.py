@@ -40,7 +40,7 @@ template set.
 import logging
 import random
 import re
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional
 
 import z3
 from miasm.expression.expression import (
@@ -115,6 +115,94 @@ class TemplateOracle:
         self.num_samples = num_samples
         self.inputs = inputs
         self.oracle_map = oracle_map
+        # Skeleton index: hash of the template's operator tree (with constants
+        # and constant-placeholders treated as wildcards) -> list of templates.
+        # Lets the solver look up "templates whose shape matches this target's
+        # shape" in O(1), independent of the constants involved. The
+        # hand-crafted runtime templates are indexed here at construction;
+        # callers can extend the oracle via :meth:`add_template`.
+        self._skeleton_buckets: Dict[str, List[Expr]] = {}
+        for templates in oracle_map.values():
+            for template in templates:
+                self._index_skeleton(template)
+
+    @staticmethod
+    def skeleton_key(expr: Expr) -> str:
+        """
+        Structural hash of ``expr``'s operator tree.
+
+        Both ``ExprInt`` nodes and constant-placeholder ``ExprId`` nodes
+        (named ``c0, c1, ...``) collapse to the wildcard ``<HOLE>``;
+        variable-placeholder ``ExprId`` nodes (``p0, p1, ...``) keep their
+        positional index so a template only matches a target with the same
+        variable-arity at the same positions; everything else collapses to
+        its type name.
+
+        Two expressions share a skeleton iff they could be unified by
+        replacing constants with each other while preserving the operator
+        structure and variable positions.
+        """
+        return calc_hash(TemplateOracle._skeleton_signature(expr))
+
+    # Operators that commute in bit-vector arithmetic: arguments can appear
+    # in any order at the AST level, so the skeleton signature sorts their
+    # sub-signatures to make matching order-independent.
+    _COMMUTATIVE_OPS = frozenset({"+", "*", "^", "&", "|"})
+
+    @staticmethod
+    def _skeleton_signature(expr: Expr) -> str:
+        """Recursive signature builder; the hashable input to ``skeleton_key``."""
+        if expr.is_int():
+            return "<HOLE>"
+        if expr.is_id():
+            name = expr.name
+            if re.match(r"^c\d+$", name):
+                return "<HOLE>"
+            if re.match(r"^p\d+$", name):
+                # Keep position; two templates with the same shape but
+                # different variable positions must not collide.
+                return f"<p{name[1:]}>"
+            return f"<id:{name}>"
+        if isinstance(expr, ExprOp):
+            arg_sigs = [
+                TemplateOracle._skeleton_signature(arg) for arg in expr.args
+            ]
+            if expr.op in TemplateOracle._COMMUTATIVE_OPS:
+                arg_sigs.sort()
+            args = ",".join(arg_sigs)
+            return f"({expr.op} {args})"
+        if isinstance(expr, ExprSlice):
+            return f"(slice {expr.start}:{expr.stop} {TemplateOracle._skeleton_signature(expr.arg)})"
+        if isinstance(expr, ExprCond):
+            return (
+                f"(cond {TemplateOracle._skeleton_signature(expr.cond)} "
+                f"{TemplateOracle._skeleton_signature(expr.src1)} "
+                f"{TemplateOracle._skeleton_signature(expr.src2)})"
+            )
+        if isinstance(expr, ExprCompose):
+            args = ",".join(
+                TemplateOracle._skeleton_signature(arg) for arg in expr.args
+            )
+            return f"(compose {args})"
+        if isinstance(expr, ExprMem):
+            return f"(mem {expr.size} {TemplateOracle._skeleton_signature(expr.ptr)})"
+        return f"<{type(expr).__name__}>"
+
+    def _index_skeleton(self, template: Expr) -> None:
+        """Insert ``template`` into the skeleton bucket for its shape."""
+        key = self.skeleton_key(template)
+        self._skeleton_buckets.setdefault(key, []).append(template)
+
+    def get_skeleton_templates(self, expr: Expr) -> Iterator[Expr]:
+        """
+        Iterate templates whose skeleton matches ``expr``'s skeleton.
+
+        Empty iterator when no template's shape matches; the caller is
+        expected to fall through to the I/O-keyed lookup in that case.
+        """
+        key = self.skeleton_key(expr)
+        for template in self._skeleton_buckets.get(key, []):
+            yield template
 
     def determine_equiv_key(self, outputs: Iterable[int]) -> str:
         """
@@ -163,11 +251,16 @@ class TemplateOracle:
         """
         Adds a template to the runtime oracle.
 
+        Writes the template to both the synthetic ``"*"`` bucket (so it is
+        reachable via :meth:`all_templates`) and to its skeleton bucket
+        (so :meth:`get_skeleton_templates` finds it for later targets of
+        the same shape).
+
         Args:
             template: Unified template with placeholders (c0, c1, ...).
         """
-        # Append to the synthetic bucket to keep lookups simple.
         self.oracle_map.setdefault("*", []).append(template)
+        self._index_skeleton(template)
 
     def get_outputs(self, expr: Expr) -> List[int]:
         """
@@ -184,72 +277,6 @@ class TemplateOracle:
             SimplificationOracle.evaluate_expression(expr, inputs)
             for inputs in self.inputs
         ]
-
-    @staticmethod
-    def _replace_constants_with_placeholders(
-        expr: Expr, max_placeholders: int
-    ) -> Optional[Expr]:
-        """
-        Replaces constants in an expression with symbolic placeholders c0, c1, ...
-
-        The method assigns a placeholder per distinct constant value/size pair.
-        If more constants are seen than max_placeholders, the expression is
-        rejected (None).
-
-        Args:
-            expr: Expression to template.
-            max_placeholders: Maximum number of placeholders allowed.
-
-        Returns:
-            Templated expression or None if not applicable.
-        """
-        # Track constants by (value, size) so identical constants share placeholders.
-        constants: Dict[Tuple[int, int], ExprId] = {}
-        placeholder_index = 0
-        overflowed = False
-
-        def build(e: Expr) -> Expr:
-            nonlocal placeholder_index
-            nonlocal overflowed
-            if e.is_int():
-                key = (int(e), e.size)
-                if key not in constants:
-                    if placeholder_index >= max_placeholders:
-                        overflowed = True
-                        return e
-                    constants[key] = ExprId(f"c{placeholder_index}", e.size)
-                    placeholder_index += 1
-                return constants[key]
-            if e.is_id():
-                return e
-            if isinstance(e, ExprOp):
-                return ExprOp(e.op, *[build(arg) for arg in e.args])
-            if isinstance(e, ExprSlice):
-                return ExprSlice(build(e.arg), e.start, e.stop)
-            if isinstance(e, ExprCond):
-                return ExprCond(build(e.cond), build(e.src1), build(e.src2))
-            if isinstance(e, ExprCompose):
-                args = [build(arg) for arg in e.args]
-                result = args[0]
-                for arg in args[1:]:
-                    result = ExprCompose(result, arg)
-                return result
-            if isinstance(e, ExprAssign):
-                return ExprAssign(build(e.dst), build(e.src))
-            if isinstance(e, ExprMem):
-                return ExprMem(build(e.ptr), e.size)
-            return e
-
-        templated = build(expr)
-        if overflowed:
-            return None
-        unique_consts = len(constants)
-        if unique_consts == 0:
-            return None
-        if unique_consts > max_placeholders:
-            return None
-        return templated
-
 
     @staticmethod
     def _gen_runtime_templates(
@@ -401,8 +428,6 @@ class CegisSolver:
       fails, and the solver re-runs with the expanded sample set.
     - Adaptive template expansion: small wrappers are generated on-demand to
       broaden coverage without a large static rule set.
-    - Template harvesting: successful candidates are generalized and added to
-      the runtime template oracle for reuse.
 
     The returned expression is still unified; the caller reverses unification to
     map pN back to original terminals.
@@ -418,8 +443,6 @@ class CegisSolver:
         validation_samples: int = 16,
         expand_templates: bool = True,
         expansion_budget: int = 40,
-        harvest_templates: bool = True,
-        harvest_max_placeholders: int = 2,
     ) -> None:
         """
         Initializes the CEGIS solver.
@@ -433,8 +456,6 @@ class CegisSolver:
             validation_samples: Samples per validation iteration.
             expand_templates: Enable adaptive template expansion.
             expansion_budget: Max expanded templates to consider.
-            harvest_templates: Enable template harvesting on success.
-            harvest_max_placeholders: Max placeholders in harvested templates.
         """
         self.template_oracle = template_oracle
         self.max_templates = max_templates
@@ -444,8 +465,6 @@ class CegisSolver:
         self.validation_samples = validation_samples
         self.expand_templates = expand_templates
         self.expansion_budget = expansion_budget
-        self.harvest_templates = harvest_templates
-        self.harvest_max_placeholders = harvest_max_placeholders
         self._translator_z3 = TranslatorZ3()
 
     @staticmethod
@@ -702,10 +721,36 @@ class CegisSolver:
         # Use the template oracle's fixed inputs as the initial sample set.
         base_inputs = list(self.template_oracle.inputs)
         base_outputs = self.template_oracle.get_outputs(unified_subtree)
+
+        # Tier 1 (cheap, shape-aware): templates whose skeleton matches the
+        # target's skeleton. O(1) lookup, no Z3 cost for non-matching shapes.
+        skeleton_templates = list(
+            self.template_oracle.get_skeleton_templates(unified_subtree)
+        )
+
+        # Tier 2 (existing): I/O-behaviour-keyed lookup. Still useful for
+        # the rare case of exact behavioural match on the truncated key.
         equiv_key = self.template_oracle.determine_equiv_key(base_outputs)
-        templates = list(self.template_oracle.get_templates(equiv_key))
+        keyed_templates = list(self.template_oracle.get_templates(equiv_key))
+
+        # Tier 3: full template iteration. Only enter when both keyed
+        # paths come up empty.
+        templates = skeleton_templates + keyed_templates
         if not templates:
             templates = list(self.template_oracle.all_templates())
+
+        # De-duplicate while preserving order: the same template can live in
+        # both the skeleton bucket and the synthetic ``"*"`` bucket; we only
+        # want to spend Z3 on it once.
+        seen_ids = set()
+        deduped: List[Expr] = []
+        for template in templates:
+            tid = id(template)
+            if tid in seen_ids:
+                continue
+            seen_ids.add(tid)
+            deduped.append(template)
+        templates = deduped
 
         if self.expand_templates:
             templates = self._expand_templates(templates, subtree.size)
@@ -737,15 +782,7 @@ class CegisSolver:
                     unified_subtree, candidate, num_vars, subtree.size
                 )
                 if counterexample is None:
-                    final_candidate = reverse_unification(candidate, unification_dict)
-                    if self.harvest_templates:
-                        # Generalize the successful candidate back into a template.
-                        templated = TemplateOracle._replace_constants_with_placeholders(
-                            candidate, self.harvest_max_placeholders
-                        )
-                        if templated is not None:
-                            self.template_oracle.add_template(templated)
-                    return final_candidate
+                    return reverse_unification(candidate, unification_dict)
 
                 # Counterexample-guided refinement: add failing input/output.
                 inputs.append(counterexample)

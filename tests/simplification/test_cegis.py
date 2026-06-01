@@ -136,50 +136,64 @@ def test_cegis_refinement_recovers_constant() -> None:
         refinement_iters=3,
         validation_samples=4,
         expand_templates=False,
-        harvest_templates=False,
     )
     candidate = solver.try_synthesize(expr, unified, unification_dict)
     assert candidate is not None
     assert _semantically_equivalent(candidate, expr, [v0], seed=3)
 
 
-def test_cegis_harvest_reuses_template_within_run(write_empty_oracle) -> None:
+def test_cegis_skeleton_lookup_finds_shape_match(write_empty_oracle) -> None:
     """
-    Two structurally identical subtrees with different constants:
-        v0 * 0x47 + 0x13  and  v1 * 0x91 + 0x25
-    The first triggers full CEGIS + harvest; the second should be able to
-    reuse the harvested template (`pX * c0 + c1`) since the template is now
-    in the synthetic "*" bucket. We instrument `add_template` to observe
-    that at least one harvest happened during the run.
+    Skeleton bucketing pins the structural lookup: a target with the shape
+    ``p0 * <int> + <int>`` should hit the runtime template set (which
+    contains the analogous ``(c0 * p0) + c1`` template under the same
+    skeleton key once commutative ops are canonicalised).
+
+    Without this fast path, CEGIS pays ~16 Z3-UNSAT calls walking through
+    the full template list before reaching the right shape; with it, the
+    matching templates are tried first and the right one solves on the
+    first attempt.
     """
     size = 8
     v0 = ExprId("v0", size)
-    v1 = ExprId("v1", size)
-    expr = ExprOp(
-        "+",
-        v0 * ExprInt(0x47, size) + ExprInt(0x13, size),
-        v1 * ExprInt(0x91, size) + ExprInt(0x25, size),
-    )
+    expr = v0 * ExprInt(0x47, size) + ExprInt(0x13, size)
 
     s = Simplifier(
-        write_empty_oracle(num_variables=2),
+        write_empty_oracle(num_variables=1),
         enable_cegis=True,
         cegis_max_variables=1,
-        cegis_harvest_templates=True,
     )
 
-    harvest_counter = {"n": 0}
-    real_add = s._cegis_solver.template_oracle.add_template
+    # Count Z3 _solve_template calls and skeleton-bucket hits.
+    counters = {"z3": 0, "skel_hits": 0, "skel_misses": 0}
+    real_solve = s._cegis_solver._solve_template
 
-    def counting(t):
-        harvest_counter["n"] += 1
-        real_add(t)
+    def counting_solve(*a, **kw):
+        counters["z3"] += 1
+        return real_solve(*a, **kw)
 
-    s._cegis_solver.template_oracle.add_template = counting
+    s._cegis_solver._solve_template = counting_solve
+
+    real_skel = s._cegis_solver.template_oracle.get_skeleton_templates
+
+    def counting_skel(expr):
+        items = list(real_skel(expr))
+        if items:
+            counters["skel_hits"] += 1
+        else:
+            counters["skel_misses"] += 1
+        for t in items:
+            yield t
+
+    s._cegis_solver.template_oracle.get_skeleton_templates = counting_skel
 
     out = s.simplify(expr)
-    assert _semantically_equivalent(out, expr, [v0, v1], seed=4)
-    assert harvest_counter["n"] >= 1
+    assert _semantically_equivalent(out, expr, [v0], seed=5)
+    # The skeleton lookup must fire for the only non-terminal subtree the
+    # BFS visits, and the Z3 count must be far below what an unguided
+    # iteration of the full template list would cost.
+    assert counters["skel_hits"] >= 1
+    assert counters["z3"] <= 5  # generous; pre-Fix#2 was ~16
 
 
 def test_cegis_skips_when_too_many_variables(write_empty_oracle) -> None:
