@@ -288,6 +288,18 @@ class Simplifier:
         if key in self._subtree_simba_cache:
             return self._subtree_simba_cache[key]
 
+        # SiMBA assumes terminals are independent boolean variables on the
+        # 2**n cube. Global placeholders here stand in for already-simplified
+        # subtrees, so a SiMBA pass over them produces coefficient*placeholder
+        # terms that block downstream like-term collection across the
+        # reverse-unified flat sum. Skip in that case.
+        if any(
+            terminal.is_id() and terminal.name.startswith(self._global_variable_prefix)
+            for terminal in unification_dict
+        ):
+            self._subtree_simba_cache[key] = None
+            return None
+
         if len(unification_dict) > self._subtree_simba_max_vars:
             self._subtree_simba_cache[key] = None
             return None

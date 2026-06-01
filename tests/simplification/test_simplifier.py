@@ -277,6 +277,30 @@ def test_subtree_simba_respects_op_whitelist(tmp_path: Path) -> None:
     assert simplified == expr
 
 
+def test_subtree_simba_skips_placeholder_terminals(tmp_path: Path) -> None:
+    # When the unification dict's keys are global_reg placeholders introduced
+    # by an earlier BFS replacement, subtree-SiMBA must skip the subtree.
+    # SiMBA treats terminals as boolean variables on the 2**n cube; opaque
+    # placeholders standing in for arbitrary sub-expressions break that
+    # assumption and lead to coefficient*placeholder forms that block
+    # downstream like-term collection across the reverse-unified flat sum.
+    simplifier = Simplifier(
+        _write_empty_oracle(tmp_path), enable_subtree_simba=True
+    )
+
+    size = 64
+    g0 = simplifier._gen_global_variable_replacement(0, size)
+    g1 = simplifier._gen_global_variable_replacement(1, size)
+    g2 = simplifier._gen_global_variable_replacement(2, size)
+    # A flat sum of placeholders with a repeated term — exactly the shape
+    # that previously fired SiMBA and produced `2*g0 + g1 + g2` form.
+    subtree = ExprOp("+", g0, g1, g2, g0)
+    from msynth.utils.unification import gen_unification_dict
+
+    result = simplifier._try_subtree_simba(subtree, gen_unification_dict(subtree))
+    assert result is None
+
+
 def test_subtree_simba_respects_node_limit(tmp_path: Path) -> None:
     # The inner linear MBA has 5 nodes; setting the node limit to 4 must
     # block subtree-SiMBA from firing, so the expression comes back
