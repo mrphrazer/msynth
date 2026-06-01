@@ -114,7 +114,6 @@ class Simplifier:
         )
         self._subtree_simba_max_vars = subtree_simba_max_vars
         self._subtree_simba_max_nodes = subtree_simba_max_nodes
-        self._subtree_simba_cache: Dict[int, Optional[Expr]] = {}
 
     def check_semantical_equivalence(self, f1: Expr, f2: Expr) -> z3.CheckSatResult:
         """
@@ -276,17 +275,12 @@ class Simplifier:
         count under ``subtree_simba_max_vars``, AST node count under
         ``subtree_simba_max_nodes``.
 
-        Results are cached by ``id(subtree)`` for the duration of one BFS pass.
         ``SimbaPass.run`` returns the input unchanged when SiMBA does not
         apply; that case is normalized to ``None`` so callers can treat
         "no improvement" uniformly.
         """
         if self._subtree_simba_pass is None:
             return None
-
-        key = id(subtree)
-        if key in self._subtree_simba_cache:
-            return self._subtree_simba_cache[key]
 
         # SiMBA assumes terminals are independent boolean variables on the
         # 2**n cube. Global placeholders here stand in for already-simplified
@@ -297,24 +291,18 @@ class Simplifier:
             terminal.is_id() and terminal.name.startswith(self._global_variable_prefix)
             for terminal in unification_dict
         ):
-            self._subtree_simba_cache[key] = None
             return None
 
         if len(unification_dict) > self._subtree_simba_max_vars:
-            self._subtree_simba_cache[key] = None
             return None
         if len(subtree.graph().nodes()) > self._subtree_simba_max_nodes:
-            self._subtree_simba_cache[key] = None
             return None
         if not self._is_simba_op_candidate(subtree):
-            self._subtree_simba_cache[key] = None
             return None
 
         simplified = self._subtree_simba_pass.run(subtree)
         if simplified == subtree:
-            simplified = None
-
-        self._subtree_simba_cache[key] = simplified
+            return None
         return simplified
 
     def _is_suitable_simplification_candidate(
@@ -455,9 +443,6 @@ class Simplifier:
 
         # fixpoint iteration
         while True:
-            # id()-keyed entries become stale once ast.replace_expr swaps in a
-            # new subtree below; clear before each pass.
-            self._subtree_simba_cache.clear()
             before = ast
 
             # walk over all subtrees
