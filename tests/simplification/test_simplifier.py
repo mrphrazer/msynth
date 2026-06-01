@@ -227,9 +227,7 @@ def test_subtree_simba_fallback_simplifies_on_empty_oracle(tmp_path: Path) -> No
     inner = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
     expr = ExprOp(">>", inner, shift)
 
-    simplifier = Simplifier(
-        _write_empty_oracle(tmp_path), enable_subtree_simba=True
-    )
+    simplifier = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=True)
     simplified = simplifier.simplify(expr)
 
     # Inner (x & y) + (x | y) collapses to (x + y); outer >> shift remains.
@@ -251,9 +249,7 @@ def test_subtree_simba_disabled_leaves_inner_linear_mba_untouched(
     inner = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
     expr = ExprOp(">>", inner, shift)
 
-    simplifier = Simplifier(
-        _write_empty_oracle(tmp_path), enable_subtree_simba=False
-    )
+    simplifier = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=False)
     simplified = simplifier.simplify(expr)
 
     assert simplified == expr
@@ -269,9 +265,7 @@ def test_subtree_simba_respects_op_whitelist(tmp_path: Path) -> None:
     shift = ExprId("shift", size)
     expr = ExprOp(">>", x, shift)
 
-    simplifier = Simplifier(
-        _write_empty_oracle(tmp_path), enable_subtree_simba=True
-    )
+    simplifier = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=True)
     simplified = simplifier.simplify(expr)
 
     assert simplified == expr
@@ -284,9 +278,7 @@ def test_subtree_simba_skips_placeholder_terminals(tmp_path: Path) -> None:
     # placeholders standing in for arbitrary sub-expressions break that
     # assumption and lead to coefficient*placeholder forms that block
     # downstream like-term collection across the reverse-unified flat sum.
-    simplifier = Simplifier(
-        _write_empty_oracle(tmp_path), enable_subtree_simba=True
-    )
+    simplifier = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=True)
 
     size = 64
     g0 = simplifier._gen_global_variable_replacement(0, size)

@@ -164,9 +164,7 @@ class TemplateOracle:
                 return f"<p{name[1:]}>"
             return f"<id:{name}>"
         if isinstance(expr, ExprOp):
-            arg_sigs = [
-                TemplateOracle._skeleton_signature(arg) for arg in expr.args
-            ]
+            arg_sigs = [TemplateOracle._skeleton_signature(arg) for arg in expr.args]
             if expr.op in TemplateOracle._COMMUTATIVE_OPS:
                 arg_sigs.sort()
             args = ",".join(arg_sigs)
@@ -369,8 +367,7 @@ class TemplateOracle:
 
         if max_placeholders < 2:
             templates = [
-                t.replace_expr({c1: ExprInt(0, template_bits)})
-                for t in templates
+                t.replace_expr({c1: ExprInt(0, template_bits)}) for t in templates
             ]
 
         return templates[:template_budget]
@@ -488,9 +485,13 @@ class CegisSolver:
         if expr.is_int():
             return ExprInt(int(expr), size)
         if isinstance(expr, ExprOp):
-            return ExprOp(expr.op, *[CegisSolver._resize_expr(arg, size) for arg in expr.args])
+            return ExprOp(
+                expr.op, *[CegisSolver._resize_expr(arg, size) for arg in expr.args]
+            )
         if isinstance(expr, ExprSlice):
-            return ExprSlice(CegisSolver._resize_expr(expr.arg, size), expr.start, expr.stop)
+            return ExprSlice(
+                CegisSolver._resize_expr(expr.arg, size), expr.start, expr.stop
+            )
         if isinstance(expr, ExprCond):
             return ExprCond(
                 CegisSolver._resize_expr(expr.cond, size),
@@ -528,7 +529,7 @@ class CegisSolver:
         for v in get_unique_variables(expr):
             if v.is_id() and re.match(rf"^{prefix}[0-9]+$", v.name):
                 variables.append(v)  # type: ignore[arg-type]
-        return sorted(variables, key=lambda v: int(v.name[len(prefix):]))
+        return sorted(variables, key=lambda v: int(v.name[len(prefix) :]))
 
     @staticmethod
     def _evaluate_unified(expr: Expr, inputs: List[int]) -> int:
@@ -590,7 +591,9 @@ class CegisSolver:
         Returns:
             Counterexample input vector if validation fails, otherwise None.
         """
-        for inputs in self._gen_validation_inputs(num_vars, size, self.validation_samples):
+        for inputs in self._gen_validation_inputs(
+            num_vars, size, self.validation_samples
+        ):
             expected = self._evaluate_unified(unified_subtree, inputs)
             actual = self._evaluate_unified(candidate, inputs)
             if expected != actual:

@@ -8,10 +8,10 @@ CEGIS path. With CEGIS off + empty oracle, the simplifier produces the
 input unchanged; with CEGIS on, semantically-equivalent recovery is
 expected.
 """
+
 from __future__ import annotations
 
 import random
-from pathlib import Path
 
 from miasm.expression.expression import ExprId, ExprInt, ExprOp
 from miasm.expression.simplifications import expr_simp
@@ -114,9 +114,7 @@ def test_cegis_refinement_recovers_constant() -> None:
     unified = expr.replace_expr(unification_dict)
 
     inputs = [[0]]  # deliberately under-constrained
-    outputs = [
-        SimplificationOracle.evaluate_expression(unified, row) for row in inputs
-    ]
+    outputs = [SimplificationOracle.evaluate_expression(unified, row) for row in inputs]
 
     template = ExprId("p0", size) * ExprId("c0", size)
     oracle = TemplateOracle(

@@ -5,7 +5,6 @@ from typing import Dict, Optional, Tuple
 
 import z3
 from miasm.expression.expression import Expr, ExprId, ExprInt
-from miasm.expression.simplifications import expr_simp
 from miasm.ir.translators.z3_ir import TranslatorZ3
 
 from msynth.simplification.oracle import SimplificationOracle
@@ -16,6 +15,7 @@ from msynth.utils.expr_utils import (
     get_subexpressions,
     get_unique_variables,
     is_strictly_smaller_tree,
+    normalize,
 )
 from msynth.utils.sampling import has_adversarial_counterexample
 from msynth.utils.unification import gen_unification_dict, reverse_unification
@@ -520,8 +520,11 @@ class Simplifier:
                 # subtree-level SiMBA fallback on oracle miss
                 if simplified is None:
                     candidate = self._try_subtree_simba(subtree, unification_dict)
-                    if candidate is not None and self._is_suitable_simplification_candidate(
-                        subtree, candidate
+                    if (
+                        candidate is not None
+                        and self._is_suitable_simplification_candidate(
+                            subtree, candidate
+                        )
                     ):
                         simplified = candidate
 
@@ -534,8 +537,11 @@ class Simplifier:
                     candidate = self._cegis_solver.try_synthesize(
                         subtree, unified_subtree, unification_dict
                     )
-                    if candidate is not None and self._is_suitable_simplification_candidate(
-                        subtree, candidate
+                    if (
+                        candidate is not None
+                        and self._is_suitable_simplification_candidate(
+                            subtree, candidate
+                        )
                     ):
                         simplified = candidate
 
@@ -563,4 +569,4 @@ class Simplifier:
         # replace global placeholder variables with simplified subtrees in ast
         ast = self._reverse_global_unification(ast, global_unification_dict)
 
-        return expr_simp(ast)
+        return normalize(ast)
