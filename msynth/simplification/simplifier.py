@@ -10,6 +10,7 @@ from miasm.ir.translators.z3_ir import TranslatorZ3
 
 from msynth.simplification.oracle import SimplificationOracle
 from msynth.simplification.preprocessing import Preprocessor, default_preprocessor
+from msynth.simplification.cegis import CegisSolver, TemplateOracle
 from msynth.simplification.simba import SimbaPass
 from msynth.utils.expr_utils import (
     get_subexpressions,
@@ -79,6 +80,17 @@ class Simplifier:
         enable_subtree_simba: bool = True,
         subtree_simba_max_vars: int = 5,
         subtree_simba_max_nodes: int = 30,
+        enable_cegis: bool = False,
+        cegis_max_templates: int = 50,
+        cegis_timeout: int = 2,
+        cegis_max_variables: int = 3,
+        cegis_runtime_templates: int = 80,
+        cegis_refinement_iters: int = 3,
+        cegis_validation_samples: int = 16,
+        cegis_expand_templates: bool = True,
+        cegis_expansion_budget: int = 40,
+        cegis_harvest_templates: bool = True,
+        cegis_harvest_max_placeholders: int = 2,
     ):
         """
         Intializes an instance of Simplifier.
@@ -97,6 +109,32 @@ class Simplifier:
                 has more than this many terminals.
             subtree_simba_max_nodes: Skip subtree SiMBA when the Miasm graph of
                 the subtree has more than this many nodes.
+            enable_cegis: Enable CEGIS constant synthesis as a last-resort
+                fallback on oracle + subtree-SiMBA miss. **Off by default** —
+                the CEGIS path runs Z3 against up to ``cegis_max_templates``
+                templates with a per-template timeout of ``cegis_timeout``
+                seconds, which is non-trivial. Turn on for workloads whose
+                subtrees contain arbitrary constants the precomputed oracle
+                cannot cover (e.g. ``v0 * 0xDEADBEEF + 0x1337``). See
+                :mod:`msynth.simplification.cegis` for the algorithm.
+            cegis_max_templates: Max templates attempted per subtree.
+            cegis_timeout: Per-template Z3 timeout in seconds.
+            cegis_max_variables: Skip CEGIS on subtrees with more than this
+                many unified terminals.
+            cegis_runtime_templates: Size of the hand-crafted runtime
+                template oracle generated at construction.
+            cegis_refinement_iters: Max counter-example refinement
+                iterations per template attempt.
+            cegis_validation_samples: Validation samples per refinement step.
+            cegis_expand_templates: When True, wrap base templates with
+                light constant decorations (``+c``, ``^c``, ``(&c)|c'``) to
+                broaden coverage without manual enumeration.
+            cegis_expansion_budget: Cap on total expanded templates.
+            cegis_harvest_templates: When True, generalise successful
+                CEGIS candidates back into the runtime template oracle so
+                later subtrees can hit the harvested shape directly.
+            cegis_harvest_max_placeholders: Cap on placeholders allowed in
+                a harvested template.
         """
         # public attributes
         self.oracle = SimplificationOracle.load_from_file(oracle_path)
@@ -114,6 +152,25 @@ class Simplifier:
         )
         self._subtree_simba_max_vars = subtree_simba_max_vars
         self._subtree_simba_max_nodes = subtree_simba_max_nodes
+        # CEGIS solver — built lazily, only when enable_cegis=True, so the
+        # off-path costs nothing besides one None check per fallback hop.
+        self._cegis_solver: Optional[CegisSolver] = None
+        if enable_cegis:
+            template_oracle = TemplateOracle.gen_runtime_oracle(
+                template_budget=cegis_runtime_templates,
+            )
+            self._cegis_solver = CegisSolver(
+                template_oracle,
+                max_templates=cegis_max_templates,
+                solver_timeout=cegis_timeout,
+                max_variables=cegis_max_variables,
+                refinement_iters=cegis_refinement_iters,
+                validation_samples=cegis_validation_samples,
+                expand_templates=cegis_expand_templates,
+                expansion_budget=cegis_expansion_budget,
+                harvest_templates=cegis_harvest_templates,
+                harvest_max_placeholders=cegis_harvest_max_placeholders,
+            )
 
     def check_semantical_equivalence(self, f1: Expr, f2: Expr) -> z3.CheckSatResult:
         """
@@ -472,6 +529,20 @@ class Simplifier:
                 # subtree-level SiMBA fallback on oracle miss
                 if simplified is None:
                     candidate = self._try_subtree_simba(subtree, unification_dict)
+                    if candidate is not None and self._is_suitable_simplification_candidate(
+                        subtree, candidate
+                    ):
+                        simplified = candidate
+
+                # CEGIS constant synthesis on oracle + subtree-SiMBA miss.
+                # Opt-in via enable_cegis; recovers expressions whose shape
+                # matches a template but whose constants are arbitrary and
+                # therefore absent from the precomputed oracle.
+                if simplified is None and self._cegis_solver is not None:
+                    unified_subtree = subtree.replace_expr(unification_dict)
+                    candidate = self._cegis_solver.try_synthesize(
+                        subtree, unified_subtree, unification_dict
+                    )
                     if candidate is not None and self._is_suitable_simplification_candidate(
                         subtree, candidate
                     ):
