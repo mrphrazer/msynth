@@ -25,6 +25,31 @@ def _write_min_oracle(tmp_path: Path) -> Path:
     return path
 
 
+def _write_empty_oracle(
+    tmp_path: Path, num_variables: int = 3, num_samples: int = 8
+) -> Path:
+    # Empty oracle sized to hold equivalence-class queries with up to
+    # ``num_variables`` unified terminals. Used to exercise paths that
+    # must work without any pre-computed oracle entries.
+    oracle = SimplificationOracle.__new__(SimplificationOracle)
+    oracle.num_variables = num_variables
+    oracle.num_samples = num_samples
+    oracle.inputs = [
+        [(s * 17 + v * 3 + 1) & 0xFF for v in range(num_variables)]
+        for s in range(num_samples)
+    ]
+    oracle.oracle_map = {}
+
+    path = tmp_path / "empty_oracle.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(oracle, f)
+    return path
+
+
+def _nodes(expr) -> int:
+    return len(expr.graph().nodes())
+
+
 def test_skip_subtree_terminals(tmp_path: Path) -> None:
     simplifier = Simplifier(_write_min_oracle(tmp_path))
 
@@ -187,3 +212,87 @@ def test_is_suitable_simplification_candidate_rejects_sat(
     )
 
     assert not simplifier._is_suitable_simplification_candidate(expr, simplified)
+
+
+def test_subtree_simba_fallback_simplifies_on_empty_oracle(tmp_path: Path) -> None:
+    # With an empty oracle, no pre-computed equivalence class can ever match.
+    # An inner linear MBA wrapped in a non-constant right shift cannot be
+    # simplified by the global SimbaPass either (the root op is outside the
+    # linear-MBA fragment). The only path that can produce a simplification
+    # is the subtree-level SiMBA fallback, applied to the inner subtree.
+    size = 64
+    x = ExprId("x", size)
+    y = ExprId("y", size)
+    shift = ExprId("shift", size)
+    inner = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
+    expr = ExprOp(">>", inner, shift)
+
+    simplifier = Simplifier(
+        _write_empty_oracle(tmp_path), enable_subtree_simba=True
+    )
+    simplified = simplifier.simplify(expr)
+
+    # Inner (x & y) + (x | y) collapses to (x + y); outer >> shift remains.
+    expected = ExprOp(">>", ExprOp("+", x, y), shift)
+    assert simplified == expected
+    assert _nodes(simplified) < _nodes(expr)
+
+
+def test_subtree_simba_disabled_leaves_inner_linear_mba_untouched(
+    tmp_path: Path,
+) -> None:
+    # Counterproof for the previous test: with subtree-SiMBA disabled and an
+    # empty oracle, no path can match the inner subtree, so the expression
+    # must come back unchanged.
+    size = 64
+    x = ExprId("x", size)
+    y = ExprId("y", size)
+    shift = ExprId("shift", size)
+    inner = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
+    expr = ExprOp(">>", inner, shift)
+
+    simplifier = Simplifier(
+        _write_empty_oracle(tmp_path), enable_subtree_simba=False
+    )
+    simplified = simplifier.simplify(expr)
+
+    assert simplified == expr
+
+
+def test_subtree_simba_respects_op_whitelist(tmp_path: Path) -> None:
+    # The non-constant shift at the root is outside the operator whitelist,
+    # so subtree-SiMBA must reject it regardless of size or variable count.
+    # Combined with an empty oracle, this proves the whitelist is enforced:
+    # the only candidate subtree is a leaf chain and nothing fires.
+    size = 64
+    x = ExprId("x", size)
+    shift = ExprId("shift", size)
+    expr = ExprOp(">>", x, shift)
+
+    simplifier = Simplifier(
+        _write_empty_oracle(tmp_path), enable_subtree_simba=True
+    )
+    simplified = simplifier.simplify(expr)
+
+    assert simplified == expr
+
+
+def test_subtree_simba_respects_node_limit(tmp_path: Path) -> None:
+    # The inner linear MBA has 5 nodes; setting the node limit to 4 must
+    # block subtree-SiMBA from firing, so the expression comes back
+    # untouched even with subtree-SiMBA otherwise enabled.
+    size = 64
+    x = ExprId("x", size)
+    y = ExprId("y", size)
+    shift = ExprId("shift", size)
+    inner = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
+    expr = ExprOp(">>", inner, shift)
+
+    simplifier = Simplifier(
+        _write_empty_oracle(tmp_path),
+        enable_subtree_simba=True,
+        subtree_simba_max_nodes=4,
+    )
+    simplified = simplifier.simplify(expr)
+
+    assert simplified == expr

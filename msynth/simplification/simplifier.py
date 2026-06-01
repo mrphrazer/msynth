@@ -1,7 +1,7 @@
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import z3
 from miasm.expression.expression import Expr, ExprId, ExprInt
@@ -10,6 +10,7 @@ from miasm.ir.translators.z3_ir import TranslatorZ3
 
 from msynth.simplification.oracle import SimplificationOracle
 from msynth.simplification.preprocessing import Preprocessor, default_preprocessor
+from msynth.simplification.simba import SimbaPass
 from msynth.utils.expr_utils import (
     get_subexpressions,
     get_unique_variables,
@@ -75,6 +76,9 @@ class Simplifier:
         enforce_equivalence: bool = False,
         solver_timeout: int = 1,
         preprocessor: Preprocessor | None = None,
+        enable_subtree_simba: bool = True,
+        subtree_simba_max_vars: int = 5,
+        subtree_simba_max_nodes: int = 30,
     ):
         """
         Intializes an instance of Simplifier.
@@ -84,6 +88,15 @@ class Simplifier:
             enforce_equivalence: Flag to enforce semantic equivalence checks before replacements.
             solver_timeout: SMT solver timeout in seconds.
             preprocessor: Optional preprocessing pipeline applied before oracle simplification.
+            enable_subtree_simba: Enable SimbaPass as a fallback on oracle misses
+                during the simplification loop. The global SimbaPass in the
+                preprocessing pipeline runs once over the whole expression; this
+                fallback applies it to inner subtrees that the oracle did not
+                match.
+            subtree_simba_max_vars: Skip subtree SiMBA when the unification dict
+                has more than this many terminals.
+            subtree_simba_max_nodes: Skip subtree SiMBA when the Miasm graph of
+                the subtree has more than this many nodes.
         """
         # public attributes
         self.oracle = SimplificationOracle.load_from_file(oracle_path)
@@ -96,6 +109,12 @@ class Simplifier:
         self._translator_z3 = TranslatorZ3()
         self._solver = z3.Solver()
         self._global_variable_prefix = "global_reg"
+        self._subtree_simba_pass: Optional[SimbaPass] = (
+            SimbaPass() if enable_subtree_simba else None
+        )
+        self._subtree_simba_max_vars = subtree_simba_max_vars
+        self._subtree_simba_max_nodes = subtree_simba_max_nodes
+        self._subtree_simba_cache: Dict[int, Optional[Expr]] = {}
 
     def check_semantical_equivalence(self, f1: Expr, f2: Expr) -> z3.CheckSatResult:
         """
@@ -222,6 +241,69 @@ class Simplifier:
             Placeholder variable as expression.
         """
         return ExprId(f"{self._global_variable_prefix}{index}", size)
+
+    @staticmethod
+    def _is_simba_op_candidate(expr: Expr) -> bool:
+        """
+        Restrict subtree-level SiMBA to linear-friendly operators.
+
+        Multiplication is allowed only when at least one operand is a constant,
+        and shifts only with a constant shift amount. These guards keep subtree
+        SiMBA on the linear-MBA fragment SimbaPass actually supports and avoid
+        spending work on subtrees its internal classifier would reject anyway.
+        """
+        if not expr.is_op():
+            return False
+        op = expr.op
+        if op in {"+", "-", "^", "&", "|"}:
+            return True
+        if op == "*":
+            return any(arg.is_int() for arg in expr.args)
+        if op in {"<<", ">>"}:
+            return len(expr.args) == 2 and expr.args[1].is_int()
+        return False
+
+    def _try_subtree_simba(
+        self, subtree: Expr, unification_dict: Dict[Expr, Expr]
+    ) -> Optional[Expr]:
+        """
+        Run SimbaPass on a single subtree, guarded by conservative limits.
+
+        Triggered as a fallback when the oracle lookup fails. Each guard is a
+        cheap pre-filter that avoids running SimbaPass on subtrees where the
+        linear-MBA reconstruction would either be unsound or expensive:
+        operator must be in the linear-friendly whitelist, terminal-variable
+        count under ``subtree_simba_max_vars``, AST node count under
+        ``subtree_simba_max_nodes``.
+
+        Results are cached by ``id(subtree)`` for the duration of one BFS pass.
+        ``SimbaPass.run`` returns the input unchanged when SiMBA does not
+        apply; that case is normalized to ``None`` so callers can treat
+        "no improvement" uniformly.
+        """
+        if self._subtree_simba_pass is None:
+            return None
+
+        key = id(subtree)
+        if key in self._subtree_simba_cache:
+            return self._subtree_simba_cache[key]
+
+        if len(unification_dict) > self._subtree_simba_max_vars:
+            self._subtree_simba_cache[key] = None
+            return None
+        if len(subtree.graph().nodes()) > self._subtree_simba_max_nodes:
+            self._subtree_simba_cache[key] = None
+            return None
+        if not self._is_simba_op_candidate(subtree):
+            self._subtree_simba_cache[key] = None
+            return None
+
+        simplified = self._subtree_simba_pass.run(subtree)
+        if simplified == subtree:
+            simplified = None
+
+        self._subtree_simba_cache[key] = simplified
+        return simplified
 
     def _is_suitable_simplification_candidate(
         self, expr: Expr, simplified: Expr
@@ -361,6 +443,9 @@ class Simplifier:
 
         # fixpoint iteration
         while True:
+            # id()-keyed entries become stale once ast.replace_expr swaps in a
+            # new subtree below; clear before each pass.
+            self._subtree_simba_cache.clear()
             before = ast
 
             # walk over all subtrees
@@ -377,29 +462,40 @@ class Simplifier:
                     subtree.replace_expr(unification_dict)
                 )
 
-                # if the equivalence class is in the pre-computed oracle:
+                simplified: Optional[Expr] = None
+
+                # pre-computed oracle lookup
                 if self.oracle.contains_equiv_class(equiv_class):
-                    # check if there is a simpler subtree in the equivalence class
-                    success, simplified = self._find_suitable_simplification(
+                    success, candidate = self._find_suitable_simplification(
                         equiv_class, subtree, unification_dict
                     )
+                    if success:
+                        simplified = candidate
 
-                    # skip if no candidate found
-                    if not success:
-                        continue
+                # subtree-level SiMBA fallback on oracle miss
+                if simplified is None:
+                    candidate = self._try_subtree_simba(subtree, unification_dict)
+                    if candidate is not None and self._is_suitable_simplification_candidate(
+                        subtree, candidate
+                    ):
+                        simplified = candidate
 
-                    # generate global placeholder variable
-                    global_variable = self._gen_global_variable_replacement(
-                        global_ctr, subtree.size
-                    )
-                    global_ctr += 1
+                # skip if no candidate found
+                if simplified is None:
+                    continue
 
-                    # map global placeholder variable to simplified subtree
-                    global_unification_dict[global_variable] = simplified
+                # generate global placeholder variable
+                global_variable = self._gen_global_variable_replacement(
+                    global_ctr, subtree.size
+                )
+                global_ctr += 1
 
-                    # replace original subtree with global placeholder variable
-                    ast = ast.replace_expr({subtree: global_variable})
-                    break
+                # map global placeholder variable to simplified subtree
+                global_unification_dict[global_variable] = simplified
+
+                # replace original subtree with global placeholder variable
+                ast = ast.replace_expr({subtree: global_variable})
+                break
 
             # check if fixpoint is reached
             if before == ast:
