@@ -15,7 +15,15 @@ from dataclasses import dataclass
 from enum import Enum
 from itertools import combinations
 
-from miasm.expression.expression import Expr, ExprId, ExprInt, ExprMem, ExprOp
+from miasm.expression.expression import (
+    Expr,
+    ExprCompose,
+    ExprId,
+    ExprInt,
+    ExprMem,
+    ExprOp,
+    ExprSlice,
+)
 
 
 class _ExpressionKind(Enum):
@@ -30,23 +38,32 @@ def _collect_atoms(expr: Expr) -> list[Expr]:
     """
     Collect the leaf expressions SiMBA treats as boolean-cube atoms.
 
-    Atoms are ``ExprId`` (registers, named variables) and ``ExprMem``
-    (memory loads). The walk stops at memory nodes — the load itself is
-    the atom; SiMBA does not reason about the pointer's structure. This
-    matches what the rest of the simplifier already does in
-    ``get_unification_candidates`` for the oracle path, just for SiMBA's
-    cube-evaluation step.
+    Atoms are ``ExprId`` (registers, named variables), ``ExprMem``
+    (memory loads), ``ExprSlice`` (bit-field extracts), and
+    ``ExprCompose`` (bit-field concatenations). The walk stops at each
+    of these — they are the atom; SiMBA does not descend into a memory
+    load's pointer, a slice's argument, or a compose's pieces.
 
-    ExprMem is an atom rather than an opaque-unsupported leaf because
-    the linear-MBA theorem (Reichenwallner & Meerwald-Stadler, 2022)
-    only requires that an atom be substitutable with a concrete value
-    on each boolean assignment. Whether the atom is a register or a
-    memory load makes no difference to soundness.
+    Slice and Compose are atomised rather than recursed-into because the
+    linear-MBA theorem (Reichenwallner & Meerwald-Stadler, 2022) only
+    requires that an atom be substitutable with a concrete value on
+    each boolean assignment. Treating a width-crossing node opaquely is
+    sound: the cube evaluator never reasons about the bits inside, so
+    the per-bit independence the proof relies on is preserved at the
+    surrounding (linear-MBA) level. Correlations between e.g.
+    ``X[0:8]`` and ``X[8:16]`` survive because the reconstruction is
+    correct on the full cube and the reachable subset is a subset of
+    that cube.
+
+    Structural identity matters: two textually equal slice or compose
+    nodes must dedupe to one atom, or ``e ^ e`` would not collapse to
+    zero. Miasm's ``Expr.__hash__`` / ``__eq__`` are structural, which
+    makes the ``set`` here do the right thing.
     """
     atoms: set[Expr] = set()
 
     def walk(node: Expr) -> None:
-        if isinstance(node, (ExprId, ExprMem)):
+        if isinstance(node, (ExprId, ExprMem, ExprSlice, ExprCompose)):
             atoms.add(node)
             return
         if isinstance(node, ExprInt):
@@ -55,9 +72,8 @@ def _collect_atoms(expr: Expr) -> list[Expr]:
             for arg in node.args:
                 walk(arg)
             return
-        # ExprSlice / ExprCompose / ExprCond are not atomised here; the
-        # classifier will already reject expressions that contain them at
-        # mismatching widths, so they never reach the cube evaluator.
+        # ExprCond stays unsupported: conditional select isn't a linear
+        # MBA leaf, and the classifier will reject the parent anyway.
 
     walk(expr)
     return sorted(atoms, key=lambda x: str(x))
@@ -132,12 +148,13 @@ class _SimbaSimplifier:
             return _ExpressionKind.ARITHMETIC
         if isinstance(expr, ExprId):
             return _ExpressionKind.BITWISE
-        if isinstance(expr, ExprMem):
-            # Memory loads are opaque bit-vectors of fixed size; the
-            # linear-MBA cube argument does not require atoms to be
-            # registers, only that they can be substituted on each
-            # boolean assignment. The pointer inside is intentionally
-            # not inspected — the whole load is the atom.
+        if isinstance(expr, (ExprMem, ExprSlice, ExprCompose)):
+            # Memory loads, slices, and compositions are opaque
+            # bit-vectors of fixed size. The linear-MBA cube argument
+            # does not require atoms to be registers — only that they
+            # have a value on each boolean assignment. Their interiors
+            # are intentionally not inspected; the whole node is the
+            # atom. See ``_collect_atoms`` for the soundness sketch.
             return _ExpressionKind.BITWISE
         if not isinstance(expr, ExprOp):
             return None
@@ -223,7 +240,7 @@ class _SimbaSimplifier:
         """Evaluate the supported linear-MBA fragment under one Boolean assignment."""
         if isinstance(expr, ExprInt):
             return int(expr) & self.mask
-        if isinstance(expr, (ExprId, ExprMem)):
+        if isinstance(expr, (ExprId, ExprMem, ExprSlice, ExprCompose)):
             return env[expr] & self.mask
         if not isinstance(expr, ExprOp):
             raise ValueError(f"unsupported expression {type(expr).__name__}")

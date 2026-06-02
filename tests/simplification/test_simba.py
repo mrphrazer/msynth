@@ -291,12 +291,13 @@ def assert_equivalent_atoms(left: Expr, right: Expr, atoms: list[Expr]) -> None:
 
 
 def _evaluate_with_atoms(expr: Expr, env: dict[Expr, int]) -> int:
-    # Like ``evaluate`` above, but treats both ExprId and ExprMem as
-    # atomic lookups so the test can mirror SiMBA's atom semantics.
+    # Like ``evaluate`` above, but treats ExprId, ExprMem, ExprSlice,
+    # and ExprCompose as atomic lookups so the test can mirror SiMBA's
+    # atom semantics.
     mask = (1 << expr.size) - 1
     if isinstance(expr, ExprInt):
         return int(expr) & mask
-    if isinstance(expr, (ExprId, ExprMem)):
+    if isinstance(expr, (ExprId, ExprMem, ExprSlice, ExprCompose)):
         return env.get(expr, 0) & mask
     if isinstance(expr, ExprOp):
         args = [_evaluate_with_atoms(arg, env) for arg in expr.args]
