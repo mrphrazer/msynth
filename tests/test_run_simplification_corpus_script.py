@@ -27,6 +27,22 @@ def write_min_oracle(tmp_path: Path) -> Path:
     return path
 
 
+def write_broken_oracle(tmp_path: Path) -> Path:
+    # num_variables advertises two columns but the inputs matrix only has one,
+    # so the compiled evaluator raises IndexError as soon as the simplifier
+    # tries to score a two-variable subtree.
+    oracle = SimplificationOracle.__new__(SimplificationOracle)
+    oracle.num_variables = 2
+    oracle.num_samples = 3
+    oracle.inputs = [[0], [1], [2]]
+    oracle.oracle_map = {}
+
+    path = tmp_path / "oracle_broken.pickle"
+    with path.open("wb") as handle:
+        pickle.dump(oracle, handle)
+    return path
+
+
 def write_corpus(tmp_path: Path, records: list[dict[str, object]]) -> Path:
     path = tmp_path / "corpus.jsonl.gz"
     with gzip.open(path, "wt", encoding="utf-8") as handle:
@@ -139,7 +155,7 @@ def test_run_simplification_corpus_script_accepts_shorter_case(tmp_path: Path) -
 def test_run_simplification_corpus_script_reports_simplifier_error(
     tmp_path: Path,
 ) -> None:
-    oracle = write_min_oracle(tmp_path)
+    oracle = write_broken_oracle(tmp_path)
     corpus = write_corpus(
         tmp_path,
         [base_record(expr_text="x + y", expected_text="x + y")],
