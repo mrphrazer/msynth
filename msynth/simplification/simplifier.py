@@ -15,8 +15,8 @@ from msynth.utils.expr_utils import (
     get_subexpressions,
     get_unique_variables,
     is_strictly_smaller_tree,
-    normalize,
 )
+from msynth.simplification.rewrites import DEFAULT_REWRITER
 from msynth.utils.sampling import has_adversarial_counterexample
 from msynth.utils.unification import gen_unification_dict, reverse_unification
 
@@ -593,4 +593,4 @@ class Simplifier:
         # replace global placeholder variables with simplified subtrees in ast
         ast = self._reverse_global_unification(ast, global_unification_dict)
 
-        return normalize(ast)
+        return DEFAULT_REWRITER.normalize(ast)

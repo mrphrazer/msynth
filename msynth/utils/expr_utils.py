@@ -13,26 +13,6 @@ from miasm.expression.expression import (
     ExprLoc,
     LocKey,
 )
-from miasm.expression.simplifications import expr_simp
-
-from msynth.simplification.ring import ring_normalize
-
-
-def normalize(expr: Expr) -> Expr:
-    """
-    Single-entry normalisation pass for simplification outputs.
-
-    Runs Miasm's ``expr_simp`` first to canonicalise the operator tree,
-    then ``ring_normalize`` to collect coefficients across sums that
-    ``expr_simp`` deliberately leaves factored (e.g. ``c*(a+b) + a``
-    where Miasm preserves the factored form). Equivalent to calling
-    ``ring_normalize(expr_simp(expr))`` directly, but expressed as a
-    named pipeline so callers don't have to know both pieces.
-
-    Both stages are safe: ``expr_simp`` never inflates output, and
-    ``ring_normalize`` is guarded by its own net-smaller check.
-    """
-    return ring_normalize(expr_simp(expr))
 
 
 def parse_expr(expr_str: str) -> Expr:

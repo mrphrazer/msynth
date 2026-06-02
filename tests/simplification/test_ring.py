@@ -16,8 +16,7 @@ from typing import Sequence
 from miasm.expression.expression import Expr, ExprId, ExprInt, ExprOp
 from miasm.expression.simplifications import expr_simp
 
-from msynth.simplification.ring import ring_normalize
-from msynth.utils.expr_utils import normalize
+from msynth.simplification.rewrites import DEFAULT_REWRITER, ring_normalize
 
 
 def _nodes(expr: Expr) -> int:
@@ -198,7 +197,7 @@ def test_normalize_pipelines_expr_simp_then_ring() -> None:
             ExprOp("+", v1, ExprOp("*", ExprInt(2, size), v0)),
         ),
     )
-    direct = normalize(raw)
+    direct = DEFAULT_REWRITER.normalize(raw)
     composed = ring_normalize(expr_simp(raw))
     assert direct == composed
     assert _nodes(direct) < _nodes(raw)
