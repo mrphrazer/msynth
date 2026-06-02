@@ -18,6 +18,7 @@ from itertools import combinations
 from miasm.expression.expression import (
     Expr,
     ExprCompose,
+    ExprCond,
     ExprId,
     ExprInt,
     ExprMem,
@@ -34,46 +35,242 @@ class _ExpressionKind(Enum):
     MIXED = "mixed"
 
 
+# Primary leaves: nodes that SiMBA always treats as opaque atoms because
+# they are syntactic dead-ends with no "interior" structure for the
+# linear-MBA classifier to descend through. ExprCond joins this set
+# under the atomisation extension (GAMBA Section 5.5) — its value on a
+# boolean cube assignment is deterministic and structurally identified,
+# so the same soundness sketch as ExprSlice/ExprCompose carries over.
+_PRIMARY_LEAVES = (ExprId, ExprMem, ExprSlice, ExprCompose, ExprCond)
+
+
+def _apply_op_rule(
+    op: str, args: tuple, arg_kinds: list, parent_size: int
+) -> _ExpressionKind | None:
+    """
+    Per-op linear-MBA classification rule.
+
+    Given an ExprOp's operator string, args, and the classified kinds
+    of those args, return the kind of the whole op — or ``None`` if no
+    rule in the linear-MBA fragment matches (signalling that the op
+    should be treated as an opaque BITWISE atom by the caller).
+    """
+    mask = (1 << parent_size) - 1
+
+    if op == "-" and len(args) == 1:
+        return (
+            _ExpressionKind.ARITHMETIC
+            if arg_kinds[0] is _ExpressionKind.ARITHMETIC
+            else _ExpressionKind.MIXED
+        )
+
+    if op in {"+", "-"} and len(args) >= 2:
+        return (
+            _ExpressionKind.ARITHMETIC
+            if all(k is _ExpressionKind.ARITHMETIC for k in arg_kinds)
+            else _ExpressionKind.MIXED
+        )
+
+    if op == "*" and len(args) >= 2:
+        # Linear MBA terms can be multiplied by arithmetic constants, but a
+        # product of two variable-dependent bitwise/mixed expressions would
+        # be polynomial/nonlinear. The caller atomises that case.
+        non_arithmetic = sum(k is not _ExpressionKind.ARITHMETIC for k in arg_kinds)
+        if non_arithmetic > 1:
+            return None
+        return (
+            _ExpressionKind.ARITHMETIC if non_arithmetic == 0 else _ExpressionKind.MIXED
+        )
+
+    if op in {"&", "|"} and len(args) >= 2:
+        if all(k is _ExpressionKind.ARITHMETIC for k in arg_kinds):
+            return _ExpressionKind.ARITHMETIC
+        if all(k is _ExpressionKind.BITWISE for k in arg_kinds):
+            return _ExpressionKind.BITWISE
+        return None
+
+    if op == "^" and len(args) >= 2:
+        # XOR sits inside the linear-MBA fragment only under tight
+        # conditions. The cube reconstruction extrapolates from
+        # boolean-cube samples to all bit-vector inputs assuming the
+        # underlying function is a linear MBA; classifying outside
+        # that fragment produces rewrites that agree on {0,1}^n and
+        # diverge elsewhere.
+        #
+        # Valid shapes (each preserves linear-MBA-ness):
+        #   - all operands BITWISE  (possibly with all-ones constants
+        #     standing in for bitwise NOT)               -> BITWISE
+        #   - exactly one MIXED operand, the rest all-ones constants
+        #     (this is ``~MIXED`` = ``-MIXED - 1``)      -> MIXED
+        #   - all operands ARITHMETIC constants
+        #     (XOR of constants is itself a constant)    -> ARITHMETIC
+        # Everything else is non-linear in the operands and is left
+        # to the caller to atomise.
+        bitwise_count = 0
+        mixed_count = 0
+        allones_count = 0
+        non_allones_arith_count = 0
+        for arg, kind in zip(args, arg_kinds):
+            if kind is _ExpressionKind.BITWISE:
+                bitwise_count += 1
+            elif kind is _ExpressionKind.MIXED:
+                mixed_count += 1
+            else:
+                if isinstance(arg, ExprInt) and int(arg) == mask:
+                    allones_count += 1
+                else:
+                    non_allones_arith_count += 1
+
+        if bitwise_count == 0 and mixed_count == 0:
+            return _ExpressionKind.ARITHMETIC
+        if non_allones_arith_count > 0:
+            return None
+        if bitwise_count > 0 and mixed_count > 0:
+            return None
+        if mixed_count == 0:
+            return _ExpressionKind.BITWISE
+        if mixed_count == 1:
+            return _ExpressionKind.MIXED
+        return None
+
+    return None
+
+
+def _classify(
+    expr: Expr,
+    parent_size: int,
+    cache: dict[Expr, tuple[_ExpressionKind | None, bool]] | None = None,
+) -> tuple[_ExpressionKind | None, bool]:
+    """
+    Atomisation-aware classifier for SiMBA.
+
+    Returns ``(kind, is_atom)`` where ``kind`` is the linear-MBA kind
+    (ARITHMETIC, BITWISE, or MIXED) the surrounding cube reasoning sees
+    for this node, and ``is_atom`` records whether SiMBA treats the
+    node as opaque (i.e. looks it up in the cube ``env`` rather than
+    recursing into its structure).
+
+    The atomisation extension (GAMBA Section 5.5) generalises the
+    Slice/Compose/Mem leaves to every node that the strict linear-MBA
+    classifier rejects: when no per-op rule in :func:`_apply_op_rule`
+    matches, the node is returned as a BITWISE atom. Soundness rests
+    on three properties that hold for every miasm pure-function node:
+
+    1. Determinism per cube assignment — when the inner atoms take
+       fixed integer values, the node takes a deterministic integer
+       value.
+    2. Structural dedup — two textually equal occurrences map to the
+       same atom via miasm's ``Expr.__hash__`` / ``__eq__``.
+    3. Width match — checked here via ``expr.size != parent_size``,
+       so ``env[node]`` and the cube modulus align.
+
+    ``(None, True)`` is returned only when width fundamentally
+    mismatches — the no-op short-circuit signal used by callers.
+    """
+    if cache is None:
+        cache = {}
+    cached = cache.get(expr)
+    if cached is not None:
+        return cached
+
+    result = _classify_uncached(expr, parent_size, cache)
+    cache[expr] = result
+    return result
+
+
+def _classify_uncached(
+    expr: Expr,
+    parent_size: int,
+    cache: dict[Expr, tuple[_ExpressionKind | None, bool]],
+) -> tuple[_ExpressionKind | None, bool]:
+    if expr.size != parent_size:
+        return (None, True)
+    if isinstance(expr, ExprInt):
+        return (_ExpressionKind.ARITHMETIC, False)
+    if isinstance(expr, _PRIMARY_LEAVES):
+        return (_ExpressionKind.BITWISE, True)
+    if not isinstance(expr, ExprOp):
+        # Any other node kind (future miasm IL extensions) is treated
+        # as an opaque BITWISE atom. Soundness is the same as for the
+        # primary leaves above.
+        return (_ExpressionKind.BITWISE, True)
+
+    # Fast path: if the op string is outside the linear-MBA fragment,
+    # atomise the whole node without recursing into its args. This
+    # both saves work and avoids spurious None-propagation when an op
+    # like ``<<`` has args whose width differs from the op result —
+    # the cube reasoning doesn't look inside, so the inner widths are
+    # irrelevant.
+    if expr.op not in {"+", "-", "*", "&", "|", "^"}:
+        return (_ExpressionKind.BITWISE, True)
+
+    arg_results = [_classify(arg, parent_size, cache) for arg in expr.args]
+    if any(k is None for k, _ in arg_results):
+        # An arg has a fundamental width mismatch or an unrecoverable
+        # operand-kind rejection deeper inside — propagate the no-op
+        # signal. (See the "operand-kind rejection" note below for
+        # why we keep this strict.)
+        return (None, True)
+    arg_kinds = [k for k, _ in arg_results]
+
+    op_kind = _apply_op_rule(expr.op, expr.args, arg_kinds, parent_size)
+    if op_kind is None:
+        # Operand-kind rejection: the op IS in {+, -, *, &, |, ^} but
+        # this particular operand-kind combination (e.g. ``&`` over
+        # one BITWISE and one MIXED arg) doesn't match any linear-MBA
+        # rule. We deliberately DO NOT atomise here.
+        #
+        # GAMBA 5.5's "substitution of nonlinear subexpressions" is
+        # about replacing whole non-linear *operators* (shifts, cond,
+        # division, etc.) with opaque atoms; that's handled by the
+        # fast path above. Atomising operand-kind rejections is a
+        # different beast — it widens SiMBA's atom set whenever a
+        # linear-MBA-shaped op happens to mix kinds at depth, which
+        # in practice triggers verbose reconstructions over many
+        # atoms whose downstream the surrounding pipeline cannot
+        # fold back together (the demo MBA regression).
+        #
+        # Returning ``None`` here keeps SiMBA's preprocessor pass a
+        # no-op on those shapes, matching pre-extension behaviour.
+        return (None, True)
+    return (op_kind, False)
+
+
 def _collect_atoms(expr: Expr) -> list[Expr]:
     """
     Collect the leaf expressions SiMBA treats as boolean-cube atoms.
 
-    Atoms are ``ExprId`` (registers, named variables), ``ExprMem``
-    (memory loads), ``ExprSlice`` (bit-field extracts), and
-    ``ExprCompose`` (bit-field concatenations). The walk stops at each
-    of these — they are the atom; SiMBA does not descend into a memory
-    load's pointer, a slice's argument, or a compose's pieces.
+    Under the atomisation extension (GAMBA Section 5.5), an atom is
+    any node where :func:`_classify` reports ``is_atom=True`` — either
+    a primary leaf (``ExprId``, ``ExprMem``, ``ExprSlice``,
+    ``ExprCompose``, ``ExprCond``) or any subtree whose op + arg-kinds
+    don't match a linear-MBA rule. The walker stops descending at
+    those points and adds the whole subtree as a single atom.
 
-    Slice and Compose are atomised rather than recursed-into because the
-    linear-MBA theorem (Reichenwallner & Meerwald-Stadler, 2022) only
-    requires that an atom be substitutable with a concrete value on
-    each boolean assignment. Treating a width-crossing node opaquely is
-    sound: the cube evaluator never reasons about the bits inside, so
-    the per-bit independence the proof relies on is preserved at the
-    surrounding (linear-MBA) level. Correlations between e.g.
-    ``X[0:8]`` and ``X[8:16]`` survive because the reconstruction is
-    correct on the full cube and the reachable subset is a subset of
-    that cube.
-
-    Structural identity matters: two textually equal slice or compose
-    nodes must dedupe to one atom, or ``e ^ e`` would not collapse to
-    zero. Miasm's ``Expr.__hash__`` / ``__eq__`` are structural, which
-    makes the ``set`` here do the right thing.
+    Structural identity matters: two textually equal subtrees must
+    dedupe to one atom, or ``e ^ e`` would not collapse to zero.
+    Miasm's ``Expr.__hash__`` / ``__eq__`` are structural, which makes
+    the ``set`` here do the right thing for nested ExprOps as well as
+    for the primary leaves.
     """
+    parent_size = expr.size
+    cache: dict[Expr, tuple[_ExpressionKind | None, bool]] = {}
     atoms: set[Expr] = set()
 
     def walk(node: Expr) -> None:
-        if isinstance(node, (ExprId, ExprMem, ExprSlice, ExprCompose)):
-            atoms.add(node)
+        kind, is_atom = _classify(node, parent_size, cache)
+        if kind is None:
+            # Width fundamentally doesn't fit; can't atomise either.
             return
         if isinstance(node, ExprInt):
             return
+        if is_atom:
+            atoms.add(node)
+            return
+        # Decomposable: recurse into args.
         if isinstance(node, ExprOp):
             for arg in node.args:
                 walk(arg)
-            return
-        # ExprCond stays unsupported: conditional select isn't a linear
-        # MBA leaf, and the classifier will reject the parent anyway.
 
     walk(expr)
     return sorted(atoms, key=lambda x: str(x))
@@ -96,16 +293,18 @@ class _SimbaSimplifier:
         self.size = expr.size
         self.modulus = 1 << self.size
         self.mask = self.modulus - 1
+        self._classify_cache: dict[Expr, tuple[_ExpressionKind | None, bool]] = {}
         self.variables = _collect_atoms(expr)
 
     def simplify(self) -> Expr:
         if self.size <= 0:
             return self.expr
 
-        # SiMBA is only sound for linear MBAs. This pass is deliberately
-        # conservative: if the root expression is not in the supported linear
-        # fragment, preprocessing is a no-op and later simplification stages can
-        # still attempt their normal oracle-based handling.
+        # Under the atomisation extension, the only thing that can
+        # produce a no-op signal is a fundamental width mismatch — the
+        # classifier always finds an atom for everything else (at worst,
+        # the whole expression becomes a single opaque BITWISE atom and
+        # SiMBA's reconstruction returns it unchanged).
         if self._classify(self.expr) is None:
             return self.expr
 
@@ -132,130 +331,24 @@ class _SimbaSimplifier:
 
     def _classify(self, expr: Expr) -> _ExpressionKind | None:
         """
-        Return the linear-MBA kind of ``expr`` or None if unsupported.
+        Return the linear-MBA kind of ``expr`` or None if width
+        fundamentally doesn't fit the cube model.
 
-        The checker mirrors upstream SiMBA's parser-level linearity rules, but
-        applies them to Miasm nodes. Arithmetic operations may combine mixed
-        terms linearly. Multiplication is allowed only when at most one operand
-        is non-arithmetic, which models "constant times bitwise expression".
-        Bitwise operators are allowed only over purely bitwise operands, except
-        for XOR with an all-ones constant, which is how msynth's infix parser
-        represents bitwise NOT.
+        Under the atomisation extension, the only non-None failure
+        mode is a size mismatch with ``self.size``. Every other node
+        — including operators outside the linear-MBA fragment, like
+        shifts, rotations, division, multiplication of two non-arith
+        operands, and ExprCond — classifies as BITWISE because the
+        cube reasoning treats it as an opaque atom. See the module-
+        level :func:`_classify` for the soundness sketch.
         """
-        if expr.size != self.size:
-            return None
-        if isinstance(expr, ExprInt):
-            return _ExpressionKind.ARITHMETIC
-        if isinstance(expr, ExprId):
-            return _ExpressionKind.BITWISE
-        if isinstance(expr, (ExprMem, ExprSlice, ExprCompose)):
-            # Memory loads, slices, and compositions are opaque
-            # bit-vectors of fixed size. The linear-MBA cube argument
-            # does not require atoms to be registers — only that they
-            # have a value on each boolean assignment. Their interiors
-            # are intentionally not inspected; the whole node is the
-            # atom. See ``_collect_atoms`` for the soundness sketch.
-            return _ExpressionKind.BITWISE
-        if not isinstance(expr, ExprOp):
-            return None
+        kind, _ = _classify(expr, self.size, self._classify_cache)
+        return kind
 
-        kinds = [self._classify(arg) for arg in expr.args]
-        if any(kind is None for kind in kinds):
-            return None
-
-        if expr.op == "-" and len(expr.args) == 1:
-            return (
-                _ExpressionKind.ARITHMETIC
-                if kinds[0] is _ExpressionKind.ARITHMETIC
-                else _ExpressionKind.MIXED
-            )
-
-        if expr.op in {"+", "-"} and len(expr.args) >= 2:
-            return (
-                _ExpressionKind.ARITHMETIC
-                if all(kind is _ExpressionKind.ARITHMETIC for kind in kinds)
-                else _ExpressionKind.MIXED
-            )
-
-        if expr.op == "*" and len(expr.args) >= 2:
-            # Linear MBA terms can be multiplied by arithmetic constants, but a
-            # product of two variable-dependent bitwise/mixed expressions would
-            # be polynomial/nonlinear and is outside this pass.
-            non_arithmetic = sum(
-                kind is not _ExpressionKind.ARITHMETIC for kind in kinds
-            )
-            if non_arithmetic > 1:
-                return None
-            return (
-                _ExpressionKind.ARITHMETIC
-                if non_arithmetic == 0
-                else _ExpressionKind.MIXED
-            )
-
-        if expr.op in {"&", "|"} and len(expr.args) >= 2:
-            if all(kind is _ExpressionKind.ARITHMETIC for kind in kinds):
-                return _ExpressionKind.ARITHMETIC
-            if all(kind is _ExpressionKind.BITWISE for kind in kinds):
-                return _ExpressionKind.BITWISE
-            return None
-
-        if expr.op == "^" and len(expr.args) >= 2:
-            # XOR sits inside the linear-MBA fragment only under tight
-            # conditions. The cube reconstruction extrapolates from
-            # boolean-cube samples to all bit-vector inputs assuming the
-            # underlying function is a linear MBA; classifying outside
-            # that fragment produces rewrites that agree on {0,1}^n and
-            # diverge elsewhere.
-            #
-            # Valid shapes (each preserves linear-MBA-ness):
-            #   - all operands BITWISE  (possibly with all-ones constants
-            #     standing in for bitwise NOT)               -> BITWISE
-            #   - exactly one MIXED operand, the rest all-ones constants
-            #     (this is ``~MIXED`` = ``-MIXED - 1``)      -> MIXED
-            #   - all operands ARITHMETIC constants
-            #     (XOR of constants is itself a constant)    -> ARITHMETIC
-            # Everything else is non-linear in the operands and must be
-            # rejected — most importantly ``MIXED ^ MIXED`` and any mix
-            # of bitwise with non-all-ones arithmetic constants.
-            bitwise_count = 0
-            mixed_count = 0
-            allones_count = 0
-            non_allones_arith_count = 0
-            for arg, kind in zip(expr.args, kinds):
-                if kind is _ExpressionKind.BITWISE:
-                    bitwise_count += 1
-                elif kind is _ExpressionKind.MIXED:
-                    mixed_count += 1
-                else:  # ARITHMETIC
-                    if self._is_all_ones(arg):
-                        allones_count += 1
-                    else:
-                        non_allones_arith_count += 1
-
-            # Pure constant XOR — stays in the ARITHMETIC fragment.
-            if bitwise_count == 0 and mixed_count == 0:
-                return _ExpressionKind.ARITHMETIC
-
-            # Non-all-ones arithmetic constants only join with other
-            # arithmetic constants in the linear-MBA fragment.
-            if non_allones_arith_count > 0:
-                return None
-
-            # BITWISE and MIXED cannot mix under XOR.
-            if bitwise_count > 0 and mixed_count > 0:
-                return None
-
-            if mixed_count == 0:
-                return _ExpressionKind.BITWISE
-
-            # ``~MIXED`` is itself MIXED; two or more MIXED operands
-            # XOR'd together produce a non-linear function.
-            if mixed_count == 1:
-                return _ExpressionKind.MIXED
-
-            return None
-
-        return None
+    def _is_atom(self, expr: Expr) -> bool:
+        """True iff SiMBA treats ``expr`` as opaque on the cube."""
+        _, is_atom = _classify(expr, self.size, self._classify_cache)
+        return is_atom
 
     def _is_all_ones(self, expr: Expr) -> bool:
         return isinstance(expr, ExprInt) and int(expr) == self.mask
@@ -281,7 +374,9 @@ class _SimbaSimplifier:
         """Evaluate the supported linear-MBA fragment under one Boolean assignment."""
         if isinstance(expr, ExprInt):
             return int(expr) & self.mask
-        if isinstance(expr, (ExprId, ExprMem, ExprSlice, ExprCompose)):
+        if self._is_atom(expr):
+            # Primary leaf or atomised non-linear subtree — the cube
+            # treats it as an opaque variable and looks it up directly.
             return env[expr] & self.mask
         if not isinstance(expr, ExprOp):
             raise ValueError(f"unsupported expression {type(expr).__name__}")

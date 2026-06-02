@@ -198,14 +198,22 @@ def test_simba_returns_condition_unchanged() -> None:
     assert SimbaPass().run(expr) is expr
 
 
-def test_simba_unsupported_child_does_not_raise() -> None:
-    # ExprCond stays outside the supported fragment, so the classifier
-    # returns None and the pass is a no-op. ExprMem is now a recognised
-    # atom and would no longer trigger this branch on its own.
+def test_simba_atomises_cond_in_linear_combination_soundly() -> None:
+    # Under the atomisation extension (GAMBA 5.5), ExprCond is a
+    # primary atom on the cube, so this ``cond + 1`` expression is
+    # within the linear-MBA fragment and SimbaPass will reconstruct
+    # it. The reconstruction may take a different shape than the
+    # input (e.g. ``-(cond ^ 0xFF)`` instead of ``cond + 1``); the
+    # invariant we pin here is semantic equivalence — Z3 sees no
+    # bit-vector input that distinguishes the two.
     cond = ExprCond(ExprId("c", 1), ExprId("x", 8), ExprId("y", 8))
     expr = ExprOp("+", cond, ExprInt(1, 8))
 
-    assert SimbaPass().run(expr) is expr
+    out = SimbaPass().run(expr)
+    assert _xor_z3_equivalent(expr, out), (
+        f"unsound SimbaPass rewrite over ExprCond atom:\n"
+        f"  source:    {expr}\n  rewritten: {out}"
+    )
 
 
 # ---------------------------------------------------------------------------
