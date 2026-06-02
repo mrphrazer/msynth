@@ -274,10 +274,18 @@ def test_subtree_simba_respects_op_whitelist(tmp_path: Path) -> None:
 def test_subtree_simba_skips_placeholder_terminals(tmp_path: Path) -> None:
     # When the unification dict's keys are global_reg placeholders introduced
     # by an earlier BFS replacement, subtree-SiMBA must skip the subtree.
-    # SiMBA treats terminals as boolean variables on the 2**n cube; opaque
-    # placeholders standing in for arbitrary sub-expressions break that
-    # assumption and lead to coefficient*placeholder forms that block
-    # downstream like-term collection across the reverse-unified flat sum.
+    #
+    # SiMBA's cube reconstruction over the placeholder atoms is *sound* (the
+    # linear-MBA theorem doesn't care that an atom stands in for another
+    # expression), but it produces the conjunction-basis canonical form:
+    # ``g0 + g1 + g2 + g0`` becomes ``2*g0 + g1 + g2``. Once that
+    # coefficient-times-placeholder form is cemented as a new placeholder
+    # body, ring_normalize's structural like-term collection cannot fold
+    # the underlying atom-level terms together with sibling sub-expressions,
+    # and the simplifier converges to a strictly-larger fixed point.
+    #
+    # See ``test_simplifier_demo_mba_reaches_shortest_form_with_placeholder_guard``
+    # for the end-to-end regression that motivates this guard.
     simplifier = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=True)
 
     size = 64
@@ -291,6 +299,125 @@ def test_subtree_simba_skips_placeholder_terminals(tmp_path: Path) -> None:
 
     result = simplifier._try_subtree_simba(subtree, gen_unification_dict(subtree))
     assert result is None
+
+
+import pytest  # noqa: E402  (kept local to the slow regression below)
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_FULL_ORACLE = _REPO_ROOT / "oracle.pickle"
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    not _FULL_ORACLE.is_file(),
+    reason="requires the checked-in oracle.pickle (60MB precomputed library)",
+)
+def test_simplifier_demo_mba_reaches_shortest_form_with_placeholder_guard() -> None:
+    """
+    End-to-end regression for the placeholder-guard in ``_try_subtree_simba``.
+
+    Setup: a 55-node hand-built MBA over three 32-bit variables
+    ``v0, v1, v2`` (inlined below; same shape as the demo expression in
+    ``scripts/simplify_expression.py``). It expands semantically to
+    ``6*v0 + 6*v1 + 3*v2`` and the simplifier should converge to its
+    *shortest* structural form ``v2*3 + (v0+v1)*6`` (9 graph nodes).
+
+    Why this test exists: when subtree-SiMBA is allowed to run on subtrees
+    whose unification dict contains ``global_reg*`` placeholders left over
+    from earlier oracle hits, it canonicalises them into the linear-MBA
+    conjunction basis. That intermediate form introduces shifts and
+    coefficient-times-placeholder terms (e.g. ``v0 << 1`` instead of
+    ``v0 + v0``, ``0xFF * g_k`` instead of ``-g_k``) which the downstream
+    ``ring_normalize`` pass cannot fold back together — like-term
+    collection is structural, and once the shift is in place the two
+    sibling ``v0`` contributions stop sharing a structural form. Without
+    the guard the simplifier converges to
+    ``2*v0 + 3*v2 + 6*v1 + 2*(v0 << 1)`` (13 graph nodes) — same
+    coefficient combination, 44% larger, no further reduction possible.
+
+    The check is therefore two-pronged: assert the result is semantically
+    ``6*v0 + 6*v1 + 3*v2`` (via ``expr_simp`` for structural+algebraic
+    normalisation), *and* assert the node count is ≤ 9 so that a future
+    regression of the placeholder guard fails this test rather than
+    silently degrading the output's compactness.
+
+    Marked ``slow`` because it loads the 60MB precomputed oracle; the
+    simplification itself runs in ~6 seconds on a typical worker.
+    """
+    size = 32
+    v0 = ExprId("v0", size)
+    v1 = ExprId("v1", size)
+    v2 = ExprId("v2", size)
+    one = ExprInt(0x1, size)
+
+    # Three structurally repeated sub-MBAs, each a known identity over
+    # ``v0, v1, v2``. The repetition is the load-bearing part of the
+    # regression: the simplifier hits oracle simplifications on the
+    # inner sub-MBAs, introducing ``global_reg*`` placeholders, and the
+    # outer flat sum is then the subtree whose unification dict would
+    # contain those placeholders.
+    block_a = (~v0 | v2) - ~(
+        (~((((one + v2) - one) | ~v0) - ~v0) & v2) + (v2 + (v2 & ~v2))
+    )
+    block_b = (
+        (v0 & (((v0 & v1) + (v0 & v1)) + (v0 ^ v1)))
+        + (v0 & (((v0 & v1) + (v0 & v1)) + (v0 ^ v1)))
+    ) + (v0 ^ (((v0 & v1) + (v0 & v1)) + (v0 ^ v1)))
+    block_c = (
+        one
+        + ~(
+            ((v1 + (~v1 & v2)) | ((v1 + (~v1 & v2)) + (~(v1 + (~v1 & v2)) & v2)))
+            - (v1 & (v1 + (~v1 & v2)))
+        )
+    ) + ((-(-v0)) + (((v1 + (~v1 & v2)) + (~(v1 + (~v1 & v2)) & v2)) & ~v2))
+    expr = (
+        block_a
+        + block_b
+        + block_c
+        + block_a
+        + block_b
+        + block_c
+        + block_a
+        + block_b
+        + block_c
+    )
+
+    simplifier = Simplifier(_FULL_ORACLE)
+    simplified = simplifier.simplify(expr)
+
+    # Semantic check by concrete sampling — robust to the canonical
+    # form msynth chooses to emit (factored vs distributed). We expect
+    # the simplified expression to behave like ``6*v0 + 6*v1 + 3*v2``
+    # for every input. A small deterministic sample set is sufficient
+    # because a single disagreement on a 3-variable linear MBA fails
+    # the algebraic identity globally.
+    mask = (1 << size) - 1
+    samples = [
+        (0, 0, 0),
+        (1, 0, 0),
+        (0, 1, 0),
+        (0, 0, 1),
+        (1, 2, 3),
+        (0xDEAD_BEEF, 0x1234_5678, 0xCAFE_BABE),
+        (mask, mask, mask),
+        (mask - 1, 1, 2),
+    ]
+    for a, b, c in samples:
+        env = {v0: ExprInt(a, size), v1: ExprInt(b, size), v2: ExprInt(c, size)}
+        got = int(expr_simp(simplified.replace_expr(env)))
+        want = (6 * a + 6 * b + 3 * c) & mask
+        assert got == want, (
+            f"semantic mismatch at v0={a:#x} v1={b:#x} v2={c:#x}: "
+            f"got {got:#x}, want {want:#x}\n  simplified: {simplified}"
+        )
+
+    assert _nodes(simplified) <= 9, (
+        f"shortest-form regression: got {_nodes(simplified)} nodes, "
+        f"expected ≤ 9; result was {simplified!r}. "
+        "If this fires, the placeholder guard in _try_subtree_simba was "
+        "likely removed or weakened — see the comment there."
+    )
 
 
 def test_subtree_simba_respects_node_limit(tmp_path: Path) -> None:

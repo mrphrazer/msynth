@@ -337,11 +337,22 @@ class Simplifier:
         if self._subtree_simba_pass is None:
             return None
 
-        # SiMBA assumes terminals are independent boolean variables on the
-        # 2**n cube. Global placeholders here stand in for already-simplified
-        # subtrees, so a SiMBA pass over them produces coefficient*placeholder
-        # terms that block downstream like-term collection across the
-        # reverse-unified flat sum. Skip in that case.
+        # Skip subtrees whose unification dict contains a ``global_reg*``
+        # placeholder from an earlier oracle hit. The cube reconstruction
+        # itself is mathematically sound here — the linear-MBA theorem
+        # holds whether the atoms are registers or already-substituted
+        # subtrees — but the rewrite locks the simplifier into a strictly
+        # worse fixed point. SiMBA emits the *canonical* linear-MBA
+        # reconstruction in the conjunction basis, which produces forms
+        # like ``0xFF * g_k`` (in place of ``-g_k``) and ``g_k << 1`` (in
+        # place of ``g_k + g_k``). Once such a form is cemented into a
+        # new placeholder body, neither ``ring_normalize`` nor a
+        # subsequent oracle hit can fold it back together: like-term
+        # collection compares structurally, and the oracle's
+        # ``is_strictly_smaller_tree`` guard measures candidates against
+        # the already-canonicalised input and rejects the shorter
+        # candidate the library actually contains. The end result is the
+        # same coefficient combination but a larger structural form.
         if any(
             terminal.is_id() and terminal.name.startswith(self._global_variable_prefix)
             for terminal in unification_dict
