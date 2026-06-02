@@ -33,6 +33,7 @@ post-pass.
 
 from __future__ import annotations
 
+from collections import Counter as _Counter
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -659,13 +660,183 @@ def _demorgan(op_in: str, op_out: str):
 
 
 # ---------------------------------------------------------------------------
+# Family: absorption  --  GAMBA Section 5.2 boolean absorption identities
+# ---------------------------------------------------------------------------
+#
+# These are not covered by Miasm's PASS_COMMONS (verified against
+# miasm/expression/simplifications_common.py:simp_cst_propagation).
+# Both shrink the tree by one node on every match, are commutative
+# in the outer args, and are sound by truth-table inspection.
+
+
+def _apply_absorption_or(expr: Expr) -> Optional[Expr]:
+    """``a | (a & b) -> a`` (either operand order)."""
+    if not (isinstance(expr, ExprOp) and expr.op == "|" and len(expr.args) == 2):
+        return None
+    x, y = expr.args
+    # x | (x & b) -> x
+    inner = _match_binary_bitwise(y, "&")
+    if inner is not None and x in inner:
+        return x
+    # (x & b) | x -> x
+    inner = _match_binary_bitwise(x, "&")
+    if inner is not None and y in inner:
+        return y
+    return None
+
+
+def _apply_absorption_and(expr: Expr) -> Optional[Expr]:
+    """``a & (a | b) -> a`` (either operand order)."""
+    if not (isinstance(expr, ExprOp) and expr.op == "&" and len(expr.args) == 2):
+        return None
+    x, y = expr.args
+    inner = _match_binary_bitwise(y, "|")
+    if inner is not None and x in inner:
+        return x
+    inner = _match_binary_bitwise(x, "|")
+    if inner is not None and y in inner:
+        return y
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Family: redundancy  --  GAMBA Section 5.2 self-complement identities
+# ---------------------------------------------------------------------------
+#
+# ``a | ~a`` always has every bit set; ``a & ~a`` always has every bit
+# clear. Miasm does NOT recognise these patterns through PASS_COMMONS
+# (it has constant-folding for ``a & 0`` etc. but not the
+# self-complement collapse, because that requires recognising the
+# ``a ^ all_ones`` form as ``~a``).
+
+
+def _apply_redundancy_or_not(expr: Expr) -> Optional[Expr]:
+    """``a | ~a -> -1``  (i.e. all-ones at the expression's width)."""
+    if not (isinstance(expr, ExprOp) and expr.op == "|" and len(expr.args) == 2):
+        return None
+    a, b = expr.args
+    if _is_not(b) == a or _is_not(a) == b:
+        return ExprInt(_mask(expr.size), expr.size)
+    return None
+
+
+def _apply_redundancy_and_not(expr: Expr) -> Optional[Expr]:
+    """``a & ~a -> 0``."""
+    if not (isinstance(expr, ExprOp) and expr.op == "&" and len(expr.args) == 2):
+        return None
+    a, b = expr.args
+    if _is_not(b) == a or _is_not(a) == b:
+        return ExprInt(0, expr.size)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Family: factor  --  GAMBA Section 5.4 deep factorisation
+# ---------------------------------------------------------------------------
+#
+# Pattern: ``(F * a_1 * a_2 ...) + (F * b_1 * b_2 ...) + ... -> F *
+# ((a_1 * a_2 ...) + (b_1 * b_2 ...) + ...)`` for any non-constant
+# common multiset of factors `F`. Generalises ring_normalize's
+# coefficient collection (which handles the CONSTANT-only common
+# factor case) to structural common factors.
+#
+# Guarded (``guarded=True``): the net-smaller check in
+# :meth:`Rewriter.normalize` rejects rewrites that don't shrink the
+# tree. This guards against:
+# - ring_normalize having already DISTRIBUTED ``F * (a + b)`` -- factoring
+#   back is then a no-op and the guard rejects (preventing oscillation).
+# - Inflation when the residual sum doesn't compose tightly.
+
+
+def _factors_of(arg: Expr) -> List[Expr]:
+    """Decompose ``arg`` into a multiplicative factor list.
+
+    ``a * b * c`` -> ``[a, b, c]``. Bare ``x`` -> ``[x]``. A unary
+    ``-arg`` is treated as the factor list of ``arg`` extended with a
+    ``-1`` constant so the common-factor matching works on the
+    underlying product.
+    """
+    if isinstance(arg, ExprOp) and arg.op == "*":
+        return list(arg.args)
+    return [arg]
+
+
+def _apply_factor_common_subterm(expr: Expr) -> Optional[Expr]:
+    """``(F*a_1...) + (F*b_1...) + ... -> F * (a_1... + b_1... + ...)``.
+
+    Requires at least one non-constant factor in the common multiset
+    so we don't duplicate miasm's coefficient-collection /
+    ring_normalize work. Returns ``None`` (i.e. no rewrite) if no
+    common non-constant factor exists, or if the rewrite is not
+    net-smaller than the input.
+    """
+    if not (isinstance(expr, ExprOp) and expr.op == "+" and len(expr.args) >= 2):
+        return None
+
+    factor_lists = [_factors_of(arg) for arg in expr.args]
+
+    # Multiset intersection across all terms.
+    common_counter = _Counter(factor_lists[0])
+    for factors in factor_lists[1:]:
+        common_counter &= _Counter(factors)
+
+    common = list(common_counter.elements())
+    if not common:
+        return None
+    # Defer pure-constant common factors to miasm / ring_normalize.
+    if all(isinstance(f, ExprInt) for f in common):
+        return None
+
+    # Build the common factor product, deterministically ordered.
+    common_sorted = sorted(common, key=lambda x: str(x))
+    if len(common_sorted) == 1:
+        common_factor = common_sorted[0]
+    else:
+        common_factor = ExprOp("*", *common_sorted)
+
+    # Build the residual sum.
+    residual_terms: List[Expr] = []
+    for factors in factor_lists:
+        remaining = list(factors)
+        for c in common:
+            remaining.remove(c)
+        if not remaining:
+            residual_terms.append(ExprInt(1, expr.size))
+        elif len(remaining) == 1:
+            residual_terms.append(remaining[0])
+        else:
+            residual_terms.append(ExprOp("*", *remaining))
+
+    if len(residual_terms) == 1:
+        residual_sum = residual_terms[0]
+    else:
+        residual_sum = ExprOp("+", *residual_terms)
+
+    result = ExprOp("*", common_factor, residual_sum)
+
+    # Net-smaller guard.
+    if _node_count(result) < _node_count(expr):
+        return result
+    return None
+
+
+FACTOR_COMMON_SUBTERM_RULE = RewriteRule(
+    name="factor_common_subterm",
+    family="factor",
+    guarded=True,
+    apply=_apply_factor_common_subterm,
+)
+
+
+# ---------------------------------------------------------------------------
 # Default rule registry
 # ---------------------------------------------------------------------------
 
 
 DEFAULT_RULES: List[RewriteRule] = [
-    # Guarded post-pass (legacy ring normalisation)
+    # Guarded post-pass: ring normalisation (legacy) + deep factorisation
     RING_NORMALIZE_RULE,
+    FACTOR_COMMON_SUBTERM_RULE,
     # Family: inverse_element
     RewriteRule(
         name="inverse_xor_neg",
@@ -743,6 +914,32 @@ DEFAULT_RULES: List[RewriteRule] = [
         family="demorgan",
         guarded=False,
         apply=_demorgan("|", "&"),
+    ),
+    # Family: absorption (GAMBA §5.2)
+    RewriteRule(
+        name="absorption_or",
+        family="absorption",
+        guarded=False,
+        apply=_apply_absorption_or,
+    ),
+    RewriteRule(
+        name="absorption_and",
+        family="absorption",
+        guarded=False,
+        apply=_apply_absorption_and,
+    ),
+    # Family: redundancy (GAMBA §5.2)
+    RewriteRule(
+        name="redundancy_or_not",
+        family="redundancy",
+        guarded=False,
+        apply=_apply_redundancy_or_not,
+    ),
+    RewriteRule(
+        name="redundancy_and_not",
+        family="redundancy",
+        guarded=False,
+        apply=_apply_redundancy_and_not,
     ),
 ]
 

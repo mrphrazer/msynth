@@ -276,6 +276,152 @@ def _collect_atoms(expr: Expr) -> list[Expr]:
     return sorted(atoms, key=lambda x: str(x))
 
 
+# ---------------------------------------------------------------------------
+# Quine-McCluskey boolean minimisation
+# ---------------------------------------------------------------------------
+#
+# Used by ``_SimbaSimplifier._lookup_bitwise_expression`` to turn a truth
+# table into a minimal sum-of-products. Output is a list of (value, mask)
+# tuples where bits in ``mask`` are don't-cares and the remaining bits in
+# ``value`` are the required literal values. Round-trips through
+# ``_build_qm_bitwise`` to a bitwise miasm expression.
+
+
+def _qm_minimise(table: int, n_vars: int) -> list[tuple[int, int]]:
+    """
+    Quine-McCluskey minimisation of a boolean truth table.
+
+    ``table`` packs row i of the function in bit i (matching
+    ``_SimbaSimplifier._table_to_int``). ``n_vars`` is the variable
+    count, so the table has ``2 ** n_vars`` rows. Returns a list of
+    prime implicants chosen by an essential-implicant + greedy cover
+    of the original minterms.
+
+    Edge cases:
+      - ``table == 0`` -> ``[]`` (the function is constant 0).
+      - all-1s -> ``[(0, full_mask)]`` (single don't-care-everything term,
+        meaning constant 1).
+    """
+    if table == 0:
+        return []
+    full_mask = (1 << n_vars) - 1
+    rows = 1 << n_vars
+    if table == (1 << rows) - 1:
+        return [(0, full_mask)]
+
+    # Collect minterms (rows where the function is 1).
+    minterms = [row for row in range(rows) if (table >> row) & 1]
+
+    # Group implicants by popcount of the "value" (don't-care bits excluded).
+    # Each implicant is (value, mask). Iteratively combine pairs that
+    # differ in exactly one literal; the combined implicant gains a
+    # don't-care bit. Implicants that participate in a combination are
+    # marked, and the unmarked ones at every round are prime implicants.
+    current: set[tuple[int, int]] = {(m, 0) for m in minterms}
+    primes: set[tuple[int, int]] = set()
+
+    while current:
+        # Bucket by mask so we only attempt to combine same-shape implicants
+        # (different-shape pairs can't differ in exactly one literal).
+        by_mask: dict[int, list[tuple[int, int]]] = {}
+        for value, mask in current:
+            by_mask.setdefault(mask, []).append((value, mask))
+
+        used: set[tuple[int, int]] = set()
+        next_round: set[tuple[int, int]] = set()
+        for mask, items in by_mask.items():
+            # Within a single mask group, bucket further by popcount of
+            # the literal bits so a pair that differs in one bit lies
+            # exactly between adjacent groups.
+            by_popcount: dict[int, list[tuple[int, int]]] = {}
+            for value, m in items:
+                literal_bits = value & ~mask
+                by_popcount.setdefault(bin(literal_bits).count("1"), []).append(
+                    (value, m)
+                )
+            popcounts = sorted(by_popcount.keys())
+            for pc in popcounts:
+                if pc + 1 not in by_popcount:
+                    continue
+                for value_a, mask_a in by_popcount[pc]:
+                    for value_b, mask_b in by_popcount[pc + 1]:
+                        diff = (value_a ^ value_b) & ~mask
+                        if diff and (diff & (diff - 1)) == 0:
+                            combined_mask = mask | diff
+                            combined_value = value_a & ~combined_mask
+                            next_round.add((combined_value, combined_mask))
+                            used.add((value_a, mask_a))
+                            used.add((value_b, mask_b))
+
+        # Anything not combined this round is a prime implicant.
+        for item in current:
+            if item not in used:
+                primes.add(item)
+        current = next_round
+
+    prime_list = sorted(primes)
+
+    # Cover step: select essential primes first, then greedily cover the
+    # rest. ``covers[p]`` is the set of original minterms covered by p.
+    def implicant_covers(value: int, mask: int) -> set[int]:
+        # Enumerate every assignment of the don't-care bits.
+        dc_bits = [b for b in range(n_vars) if (mask >> b) & 1]
+        covered: set[int] = set()
+        for combo in range(1 << len(dc_bits)):
+            cv = value
+            for i, b in enumerate(dc_bits):
+                if (combo >> i) & 1:
+                    cv |= 1 << b
+                else:
+                    cv &= ~(1 << b)
+            covered.add(cv)
+        return covered
+
+    covers = {p: implicant_covers(*p) for p in prime_list}
+    minterm_set = set(minterms)
+
+    # For each minterm, which primes cover it?
+    cover_map: dict[int, list[tuple[int, int]]] = {m: [] for m in minterm_set}
+    for p, mts in covers.items():
+        for mt in mts:
+            if mt in cover_map:
+                cover_map[mt].append(p)
+
+    chosen: set[tuple[int, int]] = set()
+    remaining = set(minterm_set)
+
+    # Essential prime implicants: those that are the unique cover of
+    # some minterm. Repeatedly extract them until none remain — picking
+    # one essential may leave others as essential by simplification.
+    while True:
+        new_essentials = {
+            cover_map[mt][0]
+            for mt in remaining
+            if len(cover_map[mt]) == 1 and cover_map[mt][0] not in chosen
+        }
+        if not new_essentials:
+            break
+        for p in new_essentials:
+            chosen.add(p)
+            remaining -= covers[p]
+        # Drop chosen primes from cover_map so further iterations see
+        # the reduced choice set.
+        for mt in list(remaining):
+            cover_map[mt] = [p for p in cover_map[mt] if p not in chosen]
+
+    # Greedy cover for whatever the essentials didn't pick up.
+    while remaining:
+        best = max(prime_list, key=lambda p: len(covers[p] & remaining))
+        if not (covers[best] & remaining):
+            # Should not happen if the prime set is complete, but bail
+            # gracefully rather than loop forever.
+            break
+        chosen.add(best)
+        remaining -= covers[best]
+
+    return sorted(chosen)
+
+
 @dataclass(frozen=True)
 class SimbaPass:
     """Simplify supported linear MBAs before oracle-backed simplification."""
@@ -707,6 +853,12 @@ class _SimbaSimplifier:
                 if table == or_table:
                     return self._or(selected)
 
+        # Try Quine-McCluskey minimisation before falling back to DNF.
+        qm_terms = _qm_minimise(table, len(variables))
+        qm_expr = self._build_qm_bitwise(qm_terms, variables)
+        if qm_expr is not None:
+            return qm_expr
+        # Final fallback: DNF (which may return None for row-0=1 cases)
         return self._dnf_expression(predicate, variables)
 
     def _dnf_expression(
@@ -752,6 +904,37 @@ class _SimbaSimplifier:
             if value:
                 result |= 1 << index
         return result
+
+    def _build_qm_bitwise(
+        self, prime_implicants: list[tuple[int, int]], variables: list[Expr]
+    ) -> Expr | None:
+        """
+        Convert Quine-McCluskey prime implicants to a miasm bitwise expression.
+
+        Each implicant is (value, mask) where bits in ``mask`` are don't-cares
+        and bits in ``value`` outside the mask are the required literal values.
+        A fully-masked implicant (all literals don't-care) means constant 1,
+        which we cannot express in the bitwise basis — return None so the
+        caller can fall back to DNF (which also bails on the row-0=1 case).
+        """
+        if not prime_implicants:
+            return self._const(0)
+        full_mask = (1 << len(variables)) - 1
+        terms: list[Expr] = []
+        for value, mask in prime_implicants:
+            if mask == full_mask:
+                # constant 1 implicant — not expressible as a bitwise term.
+                return None
+            literals = []
+            for index in range(len(variables)):
+                if (mask >> index) & 1:
+                    continue
+                if (value >> index) & 1:
+                    literals.append(variables[index])
+                else:
+                    literals.append(self._invert(variables[index]))
+            terms.append(self._conjunction(literals))
+        return self._or(terms)
 
     def _is_sum_modulo(self, first: int, second: int, result: int) -> bool:
         return (first + second - result) % self.modulus == 0

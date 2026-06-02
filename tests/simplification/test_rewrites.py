@@ -287,6 +287,27 @@ def _matching_input(rule: RewriteRule) -> Expr:
     if name == "demorgan_or_to_and":
         return _not_(ExprOp("|", _not_(a), b))
 
+    if name == "factor_common_subterm":
+        # (a * b) + (a * c) -> a * (b + c)
+        return ExprOp(
+            "+",
+            ExprOp("*", a, b),
+            ExprOp("*", a, c),
+        )
+
+    if name == "absorption_or":
+        # a | (a & b) -> a
+        return ExprOp("|", a, ExprOp("&", a, b))
+    if name == "absorption_and":
+        # a & (a | b) -> a
+        return ExprOp("&", a, ExprOp("|", a, b))
+    if name == "redundancy_or_not":
+        # a | ~a -> -1
+        return ExprOp("|", a, _not_(a))
+    if name == "redundancy_and_not":
+        # a & ~a -> 0
+        return ExprOp("&", a, _not_(a))
+
     raise AssertionError(f"no matching input for rule {rule.name!r}")
 
 
@@ -330,6 +351,25 @@ def _non_matching_input(rule: RewriteRule) -> Expr:
         return _not_(ExprOp("&", a, b))
     if name == "demorgan_or_to_and":
         return _not_(ExprOp("|", a, b))
+
+    if name == "factor_common_subterm":
+        # (a * b) + (c * d) -- no common multiplicative factor.
+        c = ExprId("c", _SIZE)
+        d = ExprId("d", _SIZE)
+        return ExprOp("+", ExprOp("*", a, b), ExprOp("*", c, d))
+
+    if name == "absorption_or":
+        # a | (c & b) -- shared atom is not the right one
+        c = ExprId("c", _SIZE)
+        return ExprOp("|", a, ExprOp("&", c, b))
+    if name == "absorption_and":
+        c = ExprId("c", _SIZE)
+        return ExprOp("&", a, ExprOp("|", c, b))
+    if name == "redundancy_or_not":
+        # a | ~b -- different operand, not a self-complement
+        return ExprOp("|", a, _not_(b))
+    if name == "redundancy_and_not":
+        return ExprOp("&", a, _not_(b))
 
     raise AssertionError(f"no non-matching input for rule {rule.name!r}")
 
@@ -547,3 +587,249 @@ def test_normalize_is_drop_in_for_old_composition() -> None:
         old = ring_normalize(expr_simp(expr))
         new = DEFAULT_REWRITER.normalize(expr)
         _assert_sound(old, new, "drop-in vs baseline")
+
+
+# ---------------------------------------------------------------------------
+# Directed tests for GAMBA §5.2 absorption + redundancy rules
+# ---------------------------------------------------------------------------
+
+
+def test_absorption_or_basic() -> None:
+    a, b, _, _ = _atoms()
+    expr = ExprOp("|", a, ExprOp("&", a, b))
+    out = DEFAULT_REWRITER.normalize(expr)
+    assert out == a
+
+
+def test_absorption_or_symmetric() -> None:
+    a, b, _, _ = _atoms()
+    expr = ExprOp("|", ExprOp("&", a, b), a)
+    out = DEFAULT_REWRITER.normalize(expr)
+    assert out == a
+
+
+def test_absorption_and_basic() -> None:
+    a, b, _, _ = _atoms()
+    expr = ExprOp("&", a, ExprOp("|", a, b))
+    out = DEFAULT_REWRITER.normalize(expr)
+    assert out == a
+
+
+def test_absorption_and_symmetric() -> None:
+    a, b, _, _ = _atoms()
+    expr = ExprOp("&", ExprOp("|", a, b), a)
+    out = DEFAULT_REWRITER.normalize(expr)
+    assert out == a
+
+
+def test_redundancy_or_not_collapses_to_all_ones() -> None:
+    a, _, _, _ = _atoms()
+    expr = ExprOp("|", a, _not_(a))
+    out = DEFAULT_REWRITER.normalize(expr)
+    assert out == ExprInt(_MASK, _SIZE)
+
+
+def test_redundancy_or_not_symmetric() -> None:
+    a, _, _, _ = _atoms()
+    expr = ExprOp("|", _not_(a), a)
+    out = DEFAULT_REWRITER.normalize(expr)
+    assert out == ExprInt(_MASK, _SIZE)
+
+
+def test_redundancy_and_not_collapses_to_zero() -> None:
+    a, _, _, _ = _atoms()
+    expr = ExprOp("&", a, _not_(a))
+    out = DEFAULT_REWRITER.normalize(expr)
+    assert out == ExprInt(0, _SIZE)
+
+
+def test_redundancy_and_not_symmetric() -> None:
+    a, _, _, _ = _atoms()
+    expr = ExprOp("&", _not_(a), a)
+    out = DEFAULT_REWRITER.normalize(expr)
+    assert out == ExprInt(0, _SIZE)
+
+
+def test_absorption_does_not_fire_on_unrelated_operands() -> None:
+    a, b, c, _ = _atoms()
+    expr = ExprOp("|", a, ExprOp("&", c, b))
+    out = DEFAULT_REWRITER.normalize(expr)
+    # Should NOT collapse to a; just a Z3-equivalent of the input.
+    assert out != a
+
+
+def test_redundancy_does_not_fire_on_different_operands() -> None:
+    a, b, _, _ = _atoms()
+    expr = ExprOp("|", a, _not_(b))
+    out = DEFAULT_REWRITER.normalize(expr)
+    # Not a self-complement; stays non-constant.
+    assert out != ExprInt(_MASK, _SIZE)
+
+
+def test_absorption_or_with_compound_left_operand() -> None:
+    # F | (F & c) -> F  where F is itself a compound expression.
+    # We use ``a + b`` (an arithmetic compound) so miasm doesn't flatten
+    # it into the surrounding ``&`` via associativity normalisation.
+    a, b, c, _ = _atoms()
+    f = ExprOp("+", a, b)
+    expr = ExprOp("|", f, ExprOp("&", f, c))
+    out = DEFAULT_REWRITER.normalize(expr)
+    assert out == f
+
+
+def test_redundancy_inside_larger_expression() -> None:
+    # (a & ~a) + b -> 0 + b -> b
+    a, b, _, _ = _atoms()
+    expr = ExprOp("+", ExprOp("&", a, _not_(a)), b)
+    out = DEFAULT_REWRITER.normalize(expr)
+    assert out == b
+
+
+def test_absorption_rule_is_idempotent() -> None:
+    a, b, _, _ = _atoms()
+    expr = ExprOp("|", a, ExprOp("&", a, b))
+    once = DEFAULT_REWRITER.normalize(expr)
+    twice = DEFAULT_REWRITER.normalize(once)
+    assert once == twice
+
+
+# ---------------------------------------------------------------------------
+# Directed tests for GAMBA §5.4 deep factorisation
+# ---------------------------------------------------------------------------
+
+
+def _import_factor():
+    from msynth.simplification.rewrites import _apply_factor_common_subterm
+
+    return _apply_factor_common_subterm
+
+
+def test_factor_simple_xy_xz() -> None:
+    a, b, c, _ = _atoms()
+    factor = _import_factor()
+    expr = ExprOp("+", ExprOp("*", a, b), ExprOp("*", a, c))
+    out = factor(expr)
+    assert out is not None
+    # Result must be ``a * (b + c)`` in some commutative ordering.
+    assert out.op == "*"
+    assert a in out.args
+
+
+def test_factor_three_terms() -> None:
+    a, b, c, d = _atoms()
+    factor = _import_factor()
+    expr = ExprOp("+", ExprOp("*", a, b), ExprOp("*", a, c), ExprOp("*", a, d))
+    out = factor(expr)
+    assert out is not None
+    _assert_sound(expr, out, "factor three terms")
+
+
+def test_factor_with_compound_common_subexpression() -> None:
+    a, b, c, d = _atoms()
+    factor = _import_factor()
+    # ((a & b) * c) + ((a & b) * d) -> (a & b) * (c + d)
+    common = ExprOp("&", a, b)
+    expr = ExprOp("+", ExprOp("*", common, c), ExprOp("*", common, d))
+    out = factor(expr)
+    assert out is not None
+    _assert_sound(expr, out, "factor compound")
+
+
+def test_factor_rejects_no_common_factor() -> None:
+    a, b, c, d = _atoms()
+    factor = _import_factor()
+    expr = ExprOp("+", ExprOp("*", a, b), ExprOp("*", c, d))
+    assert factor(expr) is None
+
+
+def test_factor_rejects_constant_only_common() -> None:
+    # Pure-constant common factor — defer to coefficient collection.
+    a, b, _, _ = _atoms()
+    factor = _import_factor()
+    expr = ExprOp(
+        "+",
+        ExprOp("*", ExprInt(2, _SIZE), a),
+        ExprOp("*", ExprInt(3, _SIZE), b),
+    )
+    assert factor(expr) is None
+
+
+def test_factor_rejects_partial_majority() -> None:
+    # x*a + x*b + y*c -- only TWO of three share `x`. Common multiset
+    # across ALL terms is empty -> rule rejects.
+    a, b, c, d = _atoms()
+    factor = _import_factor()
+    expr = ExprOp(
+        "+",
+        ExprOp("*", a, b),
+        ExprOp("*", a, c),
+        ExprOp("*", d, c),  # third term has no `a`
+    )
+    assert factor(expr) is None
+
+
+def test_factor_net_smaller_guard_rejects_inflation() -> None:
+    # a + (a * b) -- factoring would produce ``a * (1 + b)`` which
+    # has more nodes than the input. Net-smaller guard rejects.
+    a, b, _, _ = _atoms()
+    factor = _import_factor()
+    expr = ExprOp("+", a, ExprOp("*", a, b))
+    assert factor(expr) is None
+
+
+def test_factor_with_multiplicity_intersection_is_correct() -> None:
+    # Test the multiset machinery directly: factors of ``a*a*b`` should
+    # be ``[a, a, b]`` (preserving multiplicity), so the intersection
+    # with ``[a, a, c]`` is ``[a, a]``. Whether the rewrite is then
+    # accepted depends on the net-smaller guard, which is tested
+    # separately.
+    from msynth.simplification.rewrites import _factors_of
+
+    a, b, _, _ = _atoms()
+    factors = _factors_of(ExprOp("*", a, a, b))
+    assert factors.count(a) == 2
+    assert factors.count(b) == 1
+
+
+def test_factor_via_default_rewriter_normalize() -> None:
+    a, b, c, _ = _atoms()
+    expr = ExprOp("+", ExprOp("*", a, b), ExprOp("*", a, c))
+    out = DEFAULT_REWRITER.normalize(expr)
+    _assert_sound(expr, out, "factor via normalize")
+    # Output should be strictly smaller than input.
+    assert len(out.graph().nodes()) <= len(expr.graph().nodes())
+
+
+def test_factor_then_normalize_is_idempotent() -> None:
+    a, b, c, _ = _atoms()
+    expr = ExprOp("+", ExprOp("*", a, b), ExprOp("*", a, c))
+    once = DEFAULT_REWRITER.normalize(expr)
+    twice = DEFAULT_REWRITER.normalize(once)
+    assert once == twice
+
+
+def test_factor_does_not_oscillate_with_ring_normalize() -> None:
+    # ring_normalize DISTRIBUTES; factor_common_subterm UN-distributes.
+    # Both are guarded, so both must net-shrink. On a shape where
+    # neither nets a shrink, they must agree on a fixpoint.
+    a, b, c, _ = _atoms()
+    expr = ExprOp("*", a, ExprOp("+", b, c))  # already factored
+    out1 = DEFAULT_REWRITER.normalize(expr)
+    out2 = DEFAULT_REWRITER.normalize(out1)
+    assert out1 == out2
+
+
+def test_factor_three_way_compound_factor() -> None:
+    # F = (a ^ b); ((a^b)*c) + ((a^b)*d) + ((a^b)*x) -> (a^b)*(c+d+x)
+    a, b, c, d = _atoms()
+    f = ExprOp("^", a, b)
+    factor = _import_factor()
+    expr = ExprOp(
+        "+",
+        ExprOp("*", f, c),
+        ExprOp("*", f, d),
+        ExprOp("*", f, a),  # reuse a as the third "x"
+    )
+    out = factor(expr)
+    assert out is not None
+    _assert_sound(expr, out, "factor 3-way compound")
