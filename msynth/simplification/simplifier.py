@@ -149,7 +149,14 @@ class Simplifier:
         # off-path costs nothing besides one None check per fallback hop.
         self._cegis_solver: Optional[CegisSolver] = None
         if enable_cegis:
+            # The template oracle's input matrix needs at least one column per
+            # placeholder variable the solver may instantiate. Sizing it to
+            # cegis_max_variables keeps that invariant under caller-tunable
+            # variable budgets — without this, raising cegis_max_variables
+            # above the gen_runtime_oracle default crashed the evaluator with
+            # IndexError on the first >3-variable subtree.
             template_oracle = TemplateOracle.gen_runtime_oracle(
+                num_variables=cegis_max_variables,
                 template_budget=cegis_runtime_templates,
             )
             self._cegis_solver = CegisSolver(

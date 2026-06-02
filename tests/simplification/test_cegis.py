@@ -214,3 +214,76 @@ def test_cegis_skips_when_too_many_variables(write_empty_oracle) -> None:
     )
     out = s.simplify(expr)
     assert expr_simp(out) == expr_simp(expr)
+
+
+def test_cegis_template_oracle_sized_to_max_variables(write_empty_oracle) -> None:
+    """
+    The runtime template oracle's input matrix must have one column per
+    variable the CEGIS solver might try to bind. The Simplifier sizes the
+    template oracle from ``cegis_max_variables``, so raising that knob
+    must widen the matrix accordingly.
+    """
+    s = Simplifier(
+        write_empty_oracle(num_variables=5),
+        enable_cegis=True,
+        cegis_max_variables=5,
+    )
+    template_oracle = s._cegis_solver.template_oracle
+    assert template_oracle.num_variables == 5
+    for row in template_oracle.inputs:
+        assert len(row) == 5
+
+
+def test_cegis_does_not_crash_when_max_variables_above_default(
+    write_empty_oracle,
+) -> None:
+    """
+    Regression: raising ``cegis_max_variables`` above the historical
+    hardcoded template-oracle width (3) used to crash with
+    ``IndexError: list index out of range`` the first time the solver
+    evaluated a >3-variable subtree on the template oracle's inputs.
+
+    The expression uses 5 distinct terminals so the template oracle's
+    ``get_outputs`` indexes ``p4`` on every input row; with the matrix
+    sized to ``cegis_max_variables=5``, the call must complete without
+    raising. CEGIS cannot find a smaller candidate against an empty
+    oracle and no matching template; the expression is returned
+    unchanged, and that is fine — the assertion under test is "no
+    IndexError", not "successful simplification".
+    """
+    size = 8
+    a = ExprId("a", size)
+    b = ExprId("b", size)
+    c = ExprId("c", size)
+    d = ExprId("d", size)
+    e = ExprId("e", size)
+    expr = ExprOp("+", a, b, c, d, e, ExprInt(0x77, size))
+
+    s = Simplifier(
+        write_empty_oracle(num_variables=5),
+        enable_cegis=True,
+        cegis_max_variables=5,
+    )
+    out = s.simplify(expr)
+    assert _semantically_equivalent(out, expr, [a, b, c, d, e], seed=7)
+
+
+def test_cegis_template_oracle_width_matches_below_default(
+    write_empty_oracle,
+) -> None:
+    """
+    Symmetric to the regression test: lowering ``cegis_max_variables``
+    below the historical hardcoded default (3) must also shrink the
+    template oracle's input rows so the two stay coupled in both
+    directions. Tests construction shape only — solving behaviour at
+    each width is covered by the existing CEGIS tests.
+    """
+    s = Simplifier(
+        write_empty_oracle(num_variables=1),
+        enable_cegis=True,
+        cegis_max_variables=1,
+    )
+    template_oracle = s._cegis_solver.template_oracle
+    assert template_oracle.num_variables == 1
+    for row in template_oracle.inputs:
+        assert len(row) == 1
