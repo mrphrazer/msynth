@@ -361,36 +361,54 @@ def _replace_pair_in_sum(
 # Miasm passes (``guarded=False``).
 
 
-def _inverse_xor_neg(x: Expr, y: Expr) -> Optional[Expr]:
-    """(X & Y) + (~X & Y) -> Y."""
-    a_args = _match_binary_bitwise(x, "&")
-    b_args = _match_binary_bitwise(y, "&")
-    if a_args is None or b_args is None:
-        return None
-    # Try every combination of "which arg of x is the negated half".
-    a_inner = _is_not(a_args[0])
-    if a_inner is not None and a_args[1] in b_args:
-        common = a_args[1]
-        # x has (~something & common); look for the un-negated something & common in y
-        if (a_inner in b_args) and (common in b_args):
-            return common
-    a_inner = _is_not(a_args[1])
-    if a_inner is not None and a_args[0] in b_args:
-        common = a_args[0]
-        if (a_inner in b_args) and (common in b_args):
-            return common
-    # And the symmetric case: y is the negated half.
-    b_inner = _is_not(b_args[0])
-    if b_inner is not None and b_args[1] in a_args:
-        common = b_args[1]
-        if (b_inner in a_args) and (common in a_args):
-            return common
-    b_inner = _is_not(b_args[1])
-    if b_inner is not None and b_args[0] in a_args:
-        common = b_args[0]
-        if (b_inner in a_args) and (common in a_args):
-            return common
+def _find_pq_pattern(
+    x_args: Tuple[Expr, Expr], y_args: Tuple[Expr, Expr]
+) -> Optional[Tuple[Expr, Expr]]:
+    """
+    For binary bitwise operands ``x`` and ``y`` already split into their
+    arg pairs, find ``(p, q)`` such that ``x == op(~p, q)`` and
+    ``y == op(p, q)`` (with the inner ``op`` left to the caller). Returns
+    ``(p, q)`` if found, else ``None``.
+
+    Match is by *position*, not set membership: the rewrite is only valid
+    when one side has ``~p`` at one position and ``q`` at the other, and
+    the matching side has ``p`` and ``q`` (in either order). Set-
+    membership shortcuts spuriously fire when ``p == q``: e.g. for
+    ``(~q & q) + (q & r)`` the first term is ``0`` and the whole sum is
+    ``q & r``, not ``q``, but a membership check sees both ``q`` and
+    ``q`` (== ``p`` in disguise) in ``y_args`` and returns ``q``.
+    """
+    # Each of x_args has two positions; try both as the negated half.
+    for not_p_idx in (0, 1):
+        not_p = x_args[not_p_idx]
+        p = _is_not(not_p)
+        if p is None:
+            continue
+        q = x_args[1 - not_p_idx]
+        # y must equal (p, q) or (q, p) as an ordered tuple. This
+        # explicit positional check is what avoids the set-membership
+        # degeneracy when p == q.
+        if y_args == (p, q) or y_args == (q, p):
+            return p, q
     return None
+
+
+def _inverse_xor_neg(x: Expr, y: Expr) -> Optional[Expr]:
+    """``(~P & Q) + (P & Q) -> Q``.
+
+    The caller (`_replace_pair_in_sum`) tries both ``(x, y)`` orderings,
+    so this only needs to handle the direction where ``x`` carries the
+    negated half.
+    """
+    ax = _match_binary_bitwise(x, "&")
+    ay = _match_binary_bitwise(y, "&")
+    if ax is None or ay is None:
+        return None
+    found = _find_pq_pattern(ax, ay)
+    if found is None:
+        return None
+    _p, q = found
+    return q
 
 
 def _apply_inverse_xor_neg(expr: Expr) -> Optional[Expr]:
@@ -398,26 +416,25 @@ def _apply_inverse_xor_neg(expr: Expr) -> Optional[Expr]:
 
 
 def _inverse_or_neg(x: Expr, y: Expr) -> Optional[Expr]:
-    """(X | Y) + (~X | Y) -> Y + (-1).
+    """``(~P | Q) + (P | Q) -> Q + (-1)``.
 
-    Note the result is one node larger than the bare ``Y`` form because
-    of the trailing ``-1``, but the pair collapses from ``2 * (or-tree)``
-    to ``Y + const``, a strict reduction.
+    Holds because the two ORs cover every bit position in complementary
+    patterns; their sum is ``Q`` (the always-present part) plus ``-1``
+    (because every bit not in Q ends up set on exactly one of the two
+    sides). The result is one node larger than bare ``Q`` because of
+    the trailing ``-1``, but the pair still collapses from ``2 * (or-
+    tree)`` to ``Q + const`` — a strict reduction in tree size.
     """
-    a_args = _match_binary_bitwise(x, "|")
-    b_args = _match_binary_bitwise(y, "|")
-    if a_args is None or b_args is None:
+    ax = _match_binary_bitwise(x, "|")
+    ay = _match_binary_bitwise(y, "|")
+    if ax is None or ay is None:
         return None
-    size = x.size
-    minus_one = ExprInt(_mask(size), size)
-    # Look for a common Y and a negated-X pair across the two operands.
-    for ai, common_a in [(0, a_args[1]), (1, a_args[0])]:
-        a_neg_inner = _is_not(a_args[ai])
-        if a_neg_inner is None:
-            continue
-        if (a_neg_inner in b_args) and (common_a in b_args):
-            return ExprOp("+", common_a, minus_one)
-    return None
+    found = _find_pq_pattern(ax, ay)
+    if found is None:
+        return None
+    _p, q = found
+    size = q.size
+    return ExprOp("+", q, ExprInt(_mask(size), size))
 
 
 def _apply_inverse_or_neg(expr: Expr) -> Optional[Expr]:
@@ -425,24 +442,20 @@ def _apply_inverse_or_neg(expr: Expr) -> Optional[Expr]:
 
 
 def _inverse_xor_neg_xor(x: Expr, y: Expr) -> Optional[Expr]:
-    """(X ^ Y) + (~X ^ Y) -> -1.
+    """``(~P ^ Q) + (P ^ Q) -> -1``.
 
-    Holds because the two operands cover every bit position in
-    complementary patterns, so their sum is the all-ones constant.
+    The two XORs are bitwise complements, so they sum to all-ones in
+    every position.
     """
-    a_args = _match_binary_bitwise(x, "^")
-    b_args = _match_binary_bitwise(y, "^")
-    if a_args is None or b_args is None:
+    ax = _match_binary_bitwise(x, "^")
+    ay = _match_binary_bitwise(y, "^")
+    if ax is None or ay is None:
+        return None
+    found = _find_pq_pattern(ax, ay)
+    if found is None:
         return None
     size = x.size
-    minus_one = ExprInt(_mask(size), size)
-    for ai, common_a in [(0, a_args[1]), (1, a_args[0])]:
-        a_neg_inner = _is_not(a_args[ai])
-        if a_neg_inner is None:
-            continue
-        if (a_neg_inner in b_args) and (common_a in b_args):
-            return minus_one
-    return None
+    return ExprInt(_mask(size), size)
 
 
 def _apply_inverse_xor_neg_xor(expr: Expr) -> Optional[Expr]:

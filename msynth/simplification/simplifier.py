@@ -7,6 +7,7 @@ import z3
 from miasm.expression.expression import Expr, ExprId, ExprInt
 from miasm.ir.translators.z3_ir import TranslatorZ3
 
+from msynth.simplification.ast import AbstractSyntaxTreeTranslator
 from msynth.simplification.oracle import SimplificationOracle
 from msynth.simplification.preprocessing import Preprocessor, default_preprocessor
 from msynth.simplification.cegis import CegisSolver, TemplateOracle
@@ -369,7 +370,17 @@ class Simplifier:
         simplified = self._subtree_simba_pass.run(subtree)
         if simplified == subtree:
             return None
-        return simplified
+        # SimBA's reconstruction helpers (_sum, _or, _xor, _conjunction
+        # in simba.py) emit variadic ExprOps. Re-binarise before
+        # returning so the candidate respects the main loop's binary-
+        # tree invariant: ``get_subexpressions`` only exposes
+        # intermediate sub-pair nodes when they physically exist in
+        # the AST, and ``is_strictly_smaller_tree`` compares structural
+        # node counts that differ between variadic and binary shapes.
+        # Without this, a variadic candidate looks artificially smaller
+        # than its binary-shaped equivalent and may bypass the suitability
+        # check on its raw-arity node count.
+        return AbstractSyntaxTreeTranslator().from_expr(simplified)
 
     def _is_suitable_simplification_candidate(
         self, expr: Expr, simplified: Expr
@@ -561,6 +572,13 @@ class Simplifier:
                     candidate = self._cegis_solver.try_synthesize(
                         subtree, unified_subtree, unification_dict
                     )
+                    if candidate is not None:
+                        # Re-binarise for the same reason as subtree-SimBA:
+                        # CEGIS templates resize and instantiate variadic
+                        # ExprOps. Binary form makes ``is_strictly_smaller_tree``
+                        # a fair structural comparison and keeps the
+                        # placeholder body binary for the final post-pass.
+                        candidate = AbstractSyntaxTreeTranslator().from_expr(candidate)
                     if (
                         candidate is not None
                         and self._is_suitable_simplification_candidate(

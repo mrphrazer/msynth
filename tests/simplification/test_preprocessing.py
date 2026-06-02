@@ -57,11 +57,18 @@ def test_preprocessor_runs_passes_in_order() -> None:
     assert seen == ["first", "second"]
 
 
-def test_default_preprocessor_starts_with_ast_normalization() -> None:
+def test_default_preprocessor_order() -> None:
+    # Pipeline shape: [SimbaPass, *extras, AstNormalizationPass].
+    # SimBA runs on the raw input (arity-tolerant; no binarisation
+    # needed upstream). AstNorm at the *tail* binarises whatever SimBA
+    # emits — SimBA's reconstruction helpers build variadic ops, and
+    # the main simplifier loop's get_subexpressions walk needs the
+    # binary form to expose intermediate sub-pair nodes for oracle
+    # lookup.
     preprocessor = default_preprocessor()
 
-    assert isinstance(preprocessor.passes[0], AstNormalizationPass)
-    assert isinstance(preprocessor.passes[1], SimbaPass)
+    assert isinstance(preprocessor.passes[0], SimbaPass)
+    assert isinstance(preprocessor.passes[-1], AstNormalizationPass)
 
 
 def test_simplifier_applies_optional_preprocessor(tmp_path: Path) -> None:
@@ -80,11 +87,11 @@ def test_simplifier_applies_optional_preprocessor(tmp_path: Path) -> None:
     assert simplifier.simplify(ExprId("x", 8)) == ExprInt(7, 8)
 
 
-def test_simplifier_uses_ast_preprocessor_by_default(tmp_path: Path) -> None:
+def test_simplifier_uses_default_preprocessor_order(tmp_path: Path) -> None:
     simplifier = Simplifier(_write_min_oracle(tmp_path))
 
-    assert isinstance(simplifier.preprocessor.passes[0], AstNormalizationPass)
-    assert isinstance(simplifier.preprocessor.passes[1], SimbaPass)
+    assert isinstance(simplifier.preprocessor.passes[0], SimbaPass)
+    assert isinstance(simplifier.preprocessor.passes[-1], AstNormalizationPass)
 
 
 def test_default_preprocessor_runs_simba_after_ast_normalization() -> None:

@@ -355,6 +355,67 @@ def test_rule_rejects_non_matching_input(rule: RewriteRule) -> None:
     )
 
 
+def test_inverse_xor_neg_does_not_fire_on_pq_aliased_pattern() -> None:
+    """
+    Regression: ``inverse_xor_neg`` must not fire on
+    ``(~Q & Q) + (Q & R)`` (where R != Q). Earlier implementation used
+    set-membership checks on the AND arg-pairs which spuriously matched
+    when the negated half aliased with the supposed-common half — in
+    that case ``(~Q & Q) = 0`` and the sum is ``Q & R``, not ``Q``.
+    """
+    from msynth.simplification.rewrites import _apply_inverse_xor_neg
+
+    q = ExprId("q", _SIZE)
+    r = ExprId("r", _SIZE)
+    # (~q & q) + (q & r) -- algebraically equals (q & r)
+    expr = ExprOp(
+        "+",
+        ExprOp("&", _not_(q), q),
+        ExprOp("&", q, r),
+    )
+    result = _apply_inverse_xor_neg(expr)
+    # Either the rule rejects (returns None), or its output is
+    # algebraically (q & r). Anything else is a soundness bug.
+    if result is not None:
+        assert _z3_equivalent(expr, result), (
+            f"inverse_xor_neg fired unsoundly:\n  in={expr}\n  out={result}"
+        )
+
+
+def test_inverse_or_neg_does_not_fire_on_pq_aliased_pattern() -> None:
+    from msynth.simplification.rewrites import _apply_inverse_or_neg
+
+    q = ExprId("q", _SIZE)
+    r = ExprId("r", _SIZE)
+    expr = ExprOp(
+        "+",
+        ExprOp("|", _not_(q), q),
+        ExprOp("|", q, r),
+    )
+    result = _apply_inverse_or_neg(expr)
+    if result is not None:
+        assert _z3_equivalent(expr, result), (
+            f"inverse_or_neg fired unsoundly:\n  in={expr}\n  out={result}"
+        )
+
+
+def test_inverse_xor_neg_xor_does_not_fire_on_pq_aliased_pattern() -> None:
+    from msynth.simplification.rewrites import _apply_inverse_xor_neg_xor
+
+    q = ExprId("q", _SIZE)
+    r = ExprId("r", _SIZE)
+    expr = ExprOp(
+        "+",
+        ExprOp("^", _not_(q), q),
+        ExprOp("^", q, r),
+    )
+    result = _apply_inverse_xor_neg_xor(expr)
+    if result is not None:
+        assert _z3_equivalent(expr, result), (
+            f"inverse_xor_neg_xor fired unsoundly:\n  in={expr}\n  out={result}"
+        )
+
+
 @pytest.mark.parametrize("rule", DEFAULT_RULES, ids=lambda r: r.name)
 def test_rule_output_is_equivalent_to_input(rule: RewriteRule) -> None:
     inp = _matching_input(rule)
