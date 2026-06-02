@@ -15,9 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 from itertools import combinations
 
-from miasm.expression.expression import Expr, ExprId, ExprInt, ExprOp
-
-from msynth.utils.expr_utils import get_unique_variables
+from miasm.expression.expression import Expr, ExprId, ExprInt, ExprMem, ExprOp
 
 
 class _ExpressionKind(Enum):
@@ -26,6 +24,43 @@ class _ExpressionKind(Enum):
     ARITHMETIC = "arithmetic"
     BITWISE = "bitwise"
     MIXED = "mixed"
+
+
+def _collect_atoms(expr: Expr) -> list[Expr]:
+    """
+    Collect the leaf expressions SiMBA treats as boolean-cube atoms.
+
+    Atoms are ``ExprId`` (registers, named variables) and ``ExprMem``
+    (memory loads). The walk stops at memory nodes — the load itself is
+    the atom; SiMBA does not reason about the pointer's structure. This
+    matches what the rest of the simplifier already does in
+    ``get_unification_candidates`` for the oracle path, just for SiMBA's
+    cube-evaluation step.
+
+    ExprMem is an atom rather than an opaque-unsupported leaf because
+    the linear-MBA theorem (Reichenwallner & Meerwald-Stadler, 2022)
+    only requires that an atom be substitutable with a concrete value
+    on each boolean assignment. Whether the atom is a register or a
+    memory load makes no difference to soundness.
+    """
+    atoms: set[Expr] = set()
+
+    def walk(node: Expr) -> None:
+        if isinstance(node, (ExprId, ExprMem)):
+            atoms.add(node)
+            return
+        if isinstance(node, ExprInt):
+            return
+        if isinstance(node, ExprOp):
+            for arg in node.args:
+                walk(arg)
+            return
+        # ExprSlice / ExprCompose / ExprCond are not atomised here; the
+        # classifier will already reject expressions that contain them at
+        # mismatching widths, so they never reach the cube evaluator.
+
+    walk(expr)
+    return sorted(atoms, key=lambda x: str(x))
 
 
 @dataclass(frozen=True)
@@ -45,7 +80,7 @@ class _SimbaSimplifier:
         self.size = expr.size
         self.modulus = 1 << self.size
         self.mask = self.modulus - 1
-        self.variables = get_unique_variables(expr)
+        self.variables = _collect_atoms(expr)
 
     def simplify(self) -> Expr:
         if self.size <= 0:
@@ -96,6 +131,13 @@ class _SimbaSimplifier:
         if isinstance(expr, ExprInt):
             return _ExpressionKind.ARITHMETIC
         if isinstance(expr, ExprId):
+            return _ExpressionKind.BITWISE
+        if isinstance(expr, ExprMem):
+            # Memory loads are opaque bit-vectors of fixed size; the
+            # linear-MBA cube argument does not require atoms to be
+            # registers, only that they can be substituted on each
+            # boolean assignment. The pointer inside is intentionally
+            # not inspected — the whole load is the atom.
             return _ExpressionKind.BITWISE
         if not isinstance(expr, ExprOp):
             return None
@@ -181,7 +223,7 @@ class _SimbaSimplifier:
         """Evaluate the supported linear-MBA fragment under one Boolean assignment."""
         if isinstance(expr, ExprInt):
             return int(expr) & self.mask
-        if isinstance(expr, ExprId):
+        if isinstance(expr, (ExprId, ExprMem)):
             return env[expr] & self.mask
         if not isinstance(expr, ExprOp):
             raise ValueError(f"unsupported expression {type(expr).__name__}")
@@ -541,14 +583,14 @@ class _SimbaSimplifier:
 
     def _simplify_fewer_variables(self, expr: Expr) -> Expr:
         """Rerun SiMBA after generic reconstruction removes unused variables."""
-        occurring = get_unique_variables(expr)
+        occurring = _collect_atoms(expr)
         if len(occurring) > 3:
             return expr
         inner = _SimbaSimplifier(expr)
         return inner.simplify()
 
     def _effective_variable_count(self, expr: Expr) -> int:
-        return len(get_unique_variables(expr))
+        return len(_collect_atoms(expr))
 
     def _table_to_int(self, values: list[int]) -> int:
         """Pack a truth table into an integer so tables can be compared cheaply."""

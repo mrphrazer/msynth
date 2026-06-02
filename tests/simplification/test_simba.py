@@ -199,6 +199,134 @@ def test_simba_returns_condition_unchanged() -> None:
 
 
 def test_simba_unsupported_child_does_not_raise() -> None:
-    expr = ExprOp("+", ExprMem(ExprId("ptr", 8), 8), ExprInt(1, 8))
+    # ExprCond stays outside the supported fragment, so the classifier
+    # returns None and the pass is a no-op. ExprMem is now a recognised
+    # atom and would no longer trigger this branch on its own.
+    cond = ExprCond(ExprId("c", 1), ExprId("x", 8), ExprId("y", 8))
+    expr = ExprOp("+", cond, ExprInt(1, 8))
 
     assert SimbaPass().run(expr) is expr
+
+
+def test_simba_simplifies_memory_paper_identity() -> None:
+    # The (a & b) + (a | b) == a + b identity carried by a single
+    # memory atom (b == a). Validates that ExprMem participates in the
+    # cube reconstruction, not just that it is named as an atom.
+    mem = ExprMem(ExprId("ptr", 8), 8)
+    expr = (mem & mem) + (mem | mem)
+
+    simplified = SimbaPass().run(expr)
+    assert expr_simp(simplified) == expr_simp(mem + mem)
+
+
+def test_simba_simplifies_memory_self_xor_to_zero() -> None:
+    # A standard identity over an opaque atom; verifies the cube
+    # evaluator uses structural equality so two textually identical
+    # ExprMem nodes share the same atom on the cube.
+    mem = ExprMem(ExprId("ptr", 8), 8)
+    expr = mem ^ mem
+
+    simplified = SimbaPass().run(expr)
+    assert simplified == ExprInt(0, 8)
+
+
+def test_simba_collapses_memory_andor_sum_to_linear_sum() -> None:
+    # The canonical paper-style identity (a & b) + (a | b) == a + b
+    # must hold when both atoms are memory loads, otherwise the cube
+    # argument is silently treating one of them as something else.
+    a = ExprMem(ExprId("p", 8), 8)
+    b = ExprMem(ExprId("q", 8), 8)
+    expr = (a & b) + (a | b)
+
+    simplified = SimbaPass().run(expr)
+    assert_equivalent_atoms(simplified, expr, [a, b])
+    assert node_count(simplified) <= node_count(expr)
+
+
+def test_simba_handles_mixed_register_and_memory_mba() -> None:
+    # Mixed leaves exercise the atom-collector's deterministic ordering
+    # (str-sorted across heterogeneous leaf kinds) and the cube
+    # evaluator's lookup for both ExprId and ExprMem in the same env.
+    x = ExprId("x", 8)
+    m = ExprMem(ExprId("p", 8), 8)
+    expr = (x & m) + (x | m)
+
+    simplified = SimbaPass().run(expr)
+    assert_equivalent_atoms(simplified, expr, [x, m])
+
+
+def test_simba_does_not_atomise_memory_pointer_internals() -> None:
+    # The pointer expression contains an ExprId, but the whole load is
+    # one atom — we must not also enumerate the pointer's variables on
+    # the cube, or the cube would mis-vary the load when only the
+    # pointer's bits flip. Two different ExprMem nodes over the same
+    # pointer subtree are the same atom; an inner-pointer variable
+    # is not a separate atom.
+    from msynth.simplification.simba import _collect_atoms
+
+    mem = ExprMem(ExprId("ptr", 8) + ExprInt(4, 8), 8)
+    atoms = _collect_atoms(mem)
+    assert atoms == [mem]
+
+
+def test_simba_collects_distinct_memory_loads_as_distinct_atoms() -> None:
+    # Two structurally different memory loads must end up as two atoms;
+    # collapsing them would silently treat the cube assignments as
+    # symmetric across loads they aren't.
+    from msynth.simplification.simba import _collect_atoms
+
+    a = ExprMem(ExprId("p", 8), 8)
+    b = ExprMem(ExprId("q", 8), 8)
+    atoms = _collect_atoms(a + b)
+    assert set(atoms) == {a, b}
+
+
+def assert_equivalent_atoms(left: Expr, right: Expr, atoms: list[Expr]) -> None:
+    """Boolean-cube equivalence check over an explicit atom list."""
+    assert left.size == right.size
+    assert len(atoms) <= 5
+    for assignment in range(1 << len(atoms)):
+        env = {atom: (assignment >> index) & 1 for index, atom in enumerate(atoms)}
+        assert _evaluate_with_atoms(left, env) == _evaluate_with_atoms(right, env)
+
+
+def _evaluate_with_atoms(expr: Expr, env: dict[Expr, int]) -> int:
+    # Like ``evaluate`` above, but treats both ExprId and ExprMem as
+    # atomic lookups so the test can mirror SiMBA's atom semantics.
+    mask = (1 << expr.size) - 1
+    if isinstance(expr, ExprInt):
+        return int(expr) & mask
+    if isinstance(expr, (ExprId, ExprMem)):
+        return env.get(expr, 0) & mask
+    if isinstance(expr, ExprOp):
+        args = [_evaluate_with_atoms(arg, env) for arg in expr.args]
+        if expr.op == "-" and len(args) == 1:
+            return (-args[0]) & mask
+        if expr.op == "+":
+            return sum(args) & mask
+        if expr.op == "-" and len(args) >= 2:
+            result = args[0]
+            for arg in args[1:]:
+                result -= arg
+            return result & mask
+        if expr.op == "*":
+            result = 1
+            for arg in args:
+                result *= arg
+            return result & mask
+        if expr.op == "&":
+            result = mask
+            for arg in args:
+                result &= arg
+            return result & mask
+        if expr.op == "|":
+            result = 0
+            for arg in args:
+                result |= arg
+            return result & mask
+        if expr.op == "^":
+            result = 0
+            for arg in args:
+                result ^= arg
+            return result & mask
+    raise AssertionError(f"unsupported test expression: {expr!r}")
