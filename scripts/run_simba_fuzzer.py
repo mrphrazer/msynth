@@ -25,9 +25,9 @@ obscure the signal here, so we stay inside the linear-MBA fragment
 where SimbaPass's classifier is supposed to be sound.
 
 Usage:
-    PYTHONPATH=. python3 scripts/simba_slice_compose_fuzz.py --seeds 1000
-    PYTHONPATH=. python3 scripts/simba_slice_compose_fuzz.py --seeds 5000 --depth 5
-    PYTHONPATH=. python3 scripts/simba_slice_compose_fuzz.py --seed 23   # reproduce one seed
+    PYTHONPATH=. python3 scripts/run_simba_fuzzer.py --seeds 1000
+    PYTHONPATH=. python3 scripts/run_simba_fuzzer.py --seeds 5000 --depth 5
+    PYTHONPATH=. python3 scripts/run_simba_fuzzer.py --seed 23   # reproduce one seed
 """
 
 from __future__ import annotations
@@ -191,11 +191,40 @@ def _random_linear_mba(
     return expr
 
 
-def _check_one(seed: int, *, depth: int, timeout_ms: int, samples: int) -> str:
+def _random_wide_mba(
+    rng: random.Random, leaves: list[Expr], size: int, depth: int
+) -> Expr:
+    """
+    Unconstrained generator that combines any supported operator at any
+    level. Used with --wide to stress the classifier; SimbaPass must
+    either reject (``is source``) or produce an equivalent rewrite for
+    every output of this generator.
+    """
+    mask = (1 << size) - 1
+    if depth <= 0 or rng.random() < 0.30:
+        return rng.choice(leaves)
+    choice = rng.choice(["+", "-", "&", "|", "^", "*", "neg", "not_", "+", "^"])
+    if choice == "*":
+        const = ExprInt(rng.getrandbits(size) & mask, size)
+        sub = _random_wide_mba(rng, leaves, size, depth - 1)
+        return const * sub if rng.random() < 0.5 else sub * const
+    if choice == "neg":
+        return ExprOp("-", _random_wide_mba(rng, leaves, size, depth - 1))
+    if choice == "not_":
+        return _random_wide_mba(rng, leaves, size, depth - 1) ^ ExprInt(mask, size)
+    a = _random_wide_mba(rng, leaves, size, depth - 1)
+    b = _random_wide_mba(rng, leaves, size, depth - 1)
+    return ExprOp(choice, a, b)
+
+
+def _check_one(
+    seed: int, *, depth: int, timeout_ms: int, samples: int, wide: bool
+) -> str:
     """Returns one of ``"ok"``, ``"noop"``, ``"counter"``, ``"unknown"``."""
     rng = random.Random(seed)
     leaves = _leaf_pool()
-    source = _random_linear_mba(rng, leaves, size=16, depth=depth)
+    generator = _random_wide_mba if wide else _random_linear_mba
+    source = generator(rng, leaves, size=16, depth=depth)
     rewritten = SimbaPass().run(source)
     if rewritten is source:
         return "noop"
@@ -270,6 +299,15 @@ def main() -> int:
         action="store_true",
         help="Stop on the first counterexample.",
     )
+    parser.add_argument(
+        "--wide",
+        action="store_true",
+        help=(
+            "Use an unconstrained random-MBA generator instead of the "
+            "well-typed linear-MBA grammar. Stresses the classifier; "
+            "any rewrite SimbaPass produces must still be sound."
+        ),
+    )
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -285,6 +323,7 @@ def main() -> int:
             depth=args.depth,
             timeout_ms=args.timeout_ms,
             samples=args.samples,
+            wide=args.wide,
         )
         counts[status] += 1
         if status == "counter" and args.fail_fast:

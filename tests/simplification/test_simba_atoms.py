@@ -27,7 +27,7 @@ Categories mirror the plan at
 - J: Z3-checked directed equivalence (re-asserts directed cases with SMT)
 
 A standalone fuzz harness that complements the directed Z3 cases here
-lives at ``scripts/simba_slice_compose_fuzz.py`` — run that for broader
+lives at ``scripts/run_simba_fuzzer.py`` — run that for broader
 coverage; the unit tests intentionally keep their assertions
 deterministic and cheap.
 """
@@ -529,7 +529,7 @@ def _z3_equivalent(left: Expr, right: Expr) -> bool:
         raise AssertionError(
             f"Z3 returned unknown within timeout for {left!r} vs {right!r}; "
             "shrink the inputs or move this case to the standalone "
-            "fuzz harness at scripts/simba_slice_compose_fuzz.py."
+            "fuzz harness at scripts/run_simba_fuzzer.py."
         )
     return result == z3.unsat
 

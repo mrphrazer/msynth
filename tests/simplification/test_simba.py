@@ -208,6 +208,119 @@ def test_simba_unsupported_child_does_not_raise() -> None:
     assert SimbaPass().run(expr) is expr
 
 
+# ---------------------------------------------------------------------------
+# Classifier-soundness regression: XOR over linear-MBA operands
+# ---------------------------------------------------------------------------
+#
+# Discovered via the slice/compose fuzz harness: SimbaPass's _classify
+# was returning ARITHMETIC for ``MIXED ^ MIXED`` (and for
+# ``MIXED ^ non_allones_constant``) — categories that are NOT in the
+# linear-MBA fragment. The cube reconstruction then extrapolated from
+# boolean-cube samples to all bit-vector inputs, producing rewrites
+# that agree with the source on {0,1}^n but disagree everywhere else.
+#
+# The tests below pin the classifier's correct behaviour: SimbaPass
+# must remain a no-op on these shapes (or, at worst, produce a
+# Z3-equivalent rewrite). They are intentionally small and free of
+# slices/composes so the bug is clearly orthogonal to atom kind.
+
+
+def _xor_z3_equivalent(left: Expr, right: Expr) -> bool:
+    """Local helper duplicated from test_simba_atoms.py to avoid a
+    cross-test-file import. UNSAT(left != right) iff sound rewrite."""
+    import z3
+    from miasm.ir.translators.z3_ir import TranslatorZ3
+
+    assert left.size == right.size
+    translator = TranslatorZ3()
+    z3_left = translator.from_expr(left)
+    z3_right = translator.from_expr(right)
+    solver = z3.Solver()
+    solver.set("timeout", 5000)
+    solver.add(z3_left != z3_right)
+    return solver.check() == z3.unsat
+
+
+def test_simba_classifier_rejects_xor_of_mixed_with_mixed() -> None:
+    # ((a & b) + -b) is MIXED; (c + -b) is MIXED. Their XOR is NOT a
+    # linear MBA — the rewrite must therefore be either ``is expr``
+    # (classifier rejected) or semantically equivalent to the input.
+    a = ExprId("a", 16)
+    b = ExprId("b", 16)
+    c = ExprId("c", 16)
+    d = ExprId("d", 16)
+    expr = (((a & b) + ExprOp("-", b)) ^ (c + ExprOp("-", b))) + ExprOp(
+        "-", ExprOp("-", d)
+    )
+    out = SimbaPass().run(expr)
+    assert _xor_z3_equivalent(expr, out), (
+        f"unsound SimbaPass rewrite of MIXED^MIXED:\n"
+        f"  source:    {expr}\n  rewritten: {out}"
+    )
+
+
+def test_simba_classifier_rejects_xor_of_mixed_with_non_allones_const() -> None:
+    # MIXED ^ constant (non-all-ones) is bitwise XOR with a known bit
+    # pattern — not a linear MBA when the MIXED operand isn't bitwise.
+    a = ExprId("a", 16)
+    b = ExprId("b", 16)
+    expr = ((a & b) + ExprOp("-", b)) ^ ExprInt(0x5A5A, 16)
+    out = SimbaPass().run(expr)
+    assert _xor_z3_equivalent(expr, out), (
+        f"unsound SimbaPass rewrite of MIXED^const:\n"
+        f"  source:    {expr}\n  rewritten: {out}"
+    )
+
+
+def test_simba_classifier_rejects_xor_of_three_mixed_operands() -> None:
+    # n-ary XOR over three MIXED operands. None of the operands is
+    # bitwise or all-ones, so the classifier must still reject.
+    a = ExprId("a", 16)
+    b = ExprId("b", 16)
+    c = ExprId("c", 16)
+    expr = ExprOp(
+        "^",
+        a + ExprOp("-", b),
+        b + ExprOp("-", c),
+        c + ExprOp("-", a),
+    )
+    out = SimbaPass().run(expr)
+    assert _xor_z3_equivalent(expr, out), (
+        f"unsound SimbaPass rewrite of n-ary MIXED^...^MIXED:\n"
+        f"  source:    {expr}\n  rewritten: {out}"
+    )
+
+
+def test_simba_classifier_still_accepts_mixed_xor_all_ones() -> None:
+    # ``~MIXED`` (which is ``MIXED ^ all_ones``) IS a linear MBA
+    # (``-MIXED - 1``). Coverage here must be preserved after the fix
+    # tightens the XOR classification.
+    a = ExprId("a", 16)
+    b = ExprId("b", 16)
+    expr = ((a & b) + ExprOp("-", b)) ^ ExprInt(0xFFFF, 16)
+    out = SimbaPass().run(expr)
+    assert _xor_z3_equivalent(expr, out), (
+        f"unsound SimbaPass rewrite of ~MIXED:\n  source:    {expr}\n  rewritten: {out}"
+    )
+
+
+def test_simba_classifier_still_accepts_bitwise_xor_all_ones() -> None:
+    # ``~B`` for B bitwise must still classify as BITWISE.
+    a = ExprId("a", 16)
+    expr = a ^ ExprInt(0xFFFF, 16)
+    out = SimbaPass().run(expr)
+    assert _xor_z3_equivalent(expr, out)
+
+
+def test_simba_classifier_still_accepts_pure_constant_xor() -> None:
+    # ``const ^ const`` is itself a constant; the classifier should
+    # still call it ARITHMETIC and SimbaPass should reconstruct (or
+    # leave it) cleanly.
+    expr = ExprInt(0xAA, 8) ^ ExprInt(0x33, 8)
+    out = SimbaPass().run(expr)
+    assert _xor_z3_equivalent(expr, out)
+
+
 def test_simba_simplifies_memory_paper_identity() -> None:
     # The (a & b) + (a | b) == a + b identity carried by a single
     # memory atom (b == a). Validates that ExprMem participates in the

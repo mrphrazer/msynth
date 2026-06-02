@@ -200,19 +200,60 @@ class _SimbaSimplifier:
             return None
 
         if expr.op == "^" and len(expr.args) >= 2:
-            # ``~x`` is represented by the parser as ``x ^ all_ones``. Treat that
-            # as a bitwise unary operation while still rejecting arbitrary mixed
-            # arithmetic XORs such as ``(x + y) ^ z``.
-            bitwise_args = []
+            # XOR sits inside the linear-MBA fragment only under tight
+            # conditions. The cube reconstruction extrapolates from
+            # boolean-cube samples to all bit-vector inputs assuming the
+            # underlying function is a linear MBA; classifying outside
+            # that fragment produces rewrites that agree on {0,1}^n and
+            # diverge elsewhere.
+            #
+            # Valid shapes (each preserves linear-MBA-ness):
+            #   - all operands BITWISE  (possibly with all-ones constants
+            #     standing in for bitwise NOT)               -> BITWISE
+            #   - exactly one MIXED operand, the rest all-ones constants
+            #     (this is ``~MIXED`` = ``-MIXED - 1``)      -> MIXED
+            #   - all operands ARITHMETIC constants
+            #     (XOR of constants is itself a constant)    -> ARITHMETIC
+            # Everything else is non-linear in the operands and must be
+            # rejected — most importantly ``MIXED ^ MIXED`` and any mix
+            # of bitwise with non-all-ones arithmetic constants.
+            bitwise_count = 0
+            mixed_count = 0
+            allones_count = 0
+            non_allones_arith_count = 0
             for arg, kind in zip(expr.args, kinds):
                 if kind is _ExpressionKind.BITWISE:
-                    bitwise_args.append(arg)
-                elif not self._is_all_ones(arg):
-                    if any(k is _ExpressionKind.BITWISE for k in kinds):
-                        return None
-            if bitwise_args:
+                    bitwise_count += 1
+                elif kind is _ExpressionKind.MIXED:
+                    mixed_count += 1
+                else:  # ARITHMETIC
+                    if self._is_all_ones(arg):
+                        allones_count += 1
+                    else:
+                        non_allones_arith_count += 1
+
+            # Pure constant XOR — stays in the ARITHMETIC fragment.
+            if bitwise_count == 0 and mixed_count == 0:
+                return _ExpressionKind.ARITHMETIC
+
+            # Non-all-ones arithmetic constants only join with other
+            # arithmetic constants in the linear-MBA fragment.
+            if non_allones_arith_count > 0:
+                return None
+
+            # BITWISE and MIXED cannot mix under XOR.
+            if bitwise_count > 0 and mixed_count > 0:
+                return None
+
+            if mixed_count == 0:
                 return _ExpressionKind.BITWISE
-            return _ExpressionKind.ARITHMETIC
+
+            # ``~MIXED`` is itself MIXED; two or more MIXED operands
+            # XOR'd together produce a non-linear function.
+            if mixed_count == 1:
+                return _ExpressionKind.MIXED
+
+            return None
 
         return None
 
