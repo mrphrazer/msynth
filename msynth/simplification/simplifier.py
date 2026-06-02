@@ -502,20 +502,26 @@ class Simplifier:
                 # build unification dictionary
                 unification_dict = gen_unification_dict(subtree)
 
-                # determine subtree's equivalence class
-                equiv_class = self.determine_equivalence_class(
-                    subtree.replace_expr(unification_dict)
-                )
-
                 simplified: Optional[Expr] = None
 
-                # pre-computed oracle lookup
-                if self.oracle.contains_equiv_class(equiv_class):
-                    success, candidate = self._find_suitable_simplification(
-                        equiv_class, subtree, unification_dict
+                # The oracle's I/O inputs matrix has self.oracle.num_variables
+                # columns. Subtrees with more unified terminals overflow the
+                # compiled evaluator's index lookup (i[idx] raises IndexError).
+                # Skip the oracle path for those and fall through to subtree
+                # SiMBA / CEGIS, which do their own scaling checks.
+                if len(unification_dict) <= self.oracle.num_variables:
+                    # determine subtree's equivalence class
+                    equiv_class = self.determine_equivalence_class(
+                        subtree.replace_expr(unification_dict)
                     )
-                    if success:
-                        simplified = candidate
+
+                    # pre-computed oracle lookup
+                    if self.oracle.contains_equiv_class(equiv_class):
+                        success, candidate = self._find_suitable_simplification(
+                            equiv_class, subtree, unification_dict
+                        )
+                        if success:
+                            simplified = candidate
 
                 # subtree-level SiMBA fallback on oracle miss
                 if simplified is None:
