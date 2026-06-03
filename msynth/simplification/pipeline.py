@@ -10,25 +10,33 @@ result. :class:`~msynth.simplification.simplifier.Simplifier` invokes the
 pipeline once at the top of :meth:`~Simplifier.simplify`, before its
 oracle-driven outer loop.
 
-Two ready-made factories:
+Three ready-made factories that align with the three :class:`PipelineMode`
+values:
 
-- :func:`default_pipeline` — ``[SimbaPass, AstNormalizationPass]``. The
-  production setting; intentionally omits the GAMBA pre/post sandwich
-  because the §5.2 algebraic identities collapse demo-MBA shapes into a
-  conjunction basis that defeats oracle-template matching downstream.
-- :func:`gamba_sandwich_pipeline` — ``[GambaPreprocessingPass, SimbaPass,
-  GambaPostRewriterPass, AstNormalizationPass]``. The opt-in setting for
-  SimBA-only / no-oracle runs, where the algebraic refinement on both
-  sides of SimBA is a clean win on the corpus (see
-  ``tmp/gamba_sweep_report.md`` for measurements).
+- :func:`default_pipeline` (``PipelineMode.AST``) — ``[AstNormalizationPass]``.
+  Pure structural normalisation. No simplification work. Used when the
+  caller does not want SimBA / GAMBA — for example oracle-only sweeps,
+  or as a baseline against which other modes are measured.
+- :func:`simba_pipeline` (``PipelineMode.SIMBA``) — ``[SimbaPass,
+  AstNormalizationPass]``. Linear-MBA reconstruction followed by
+  binarisation.
+- :func:`gamba_pipeline` (``PipelineMode.GAMBA``) — ``[GambaPreprocessingPass,
+  SimbaPass, GambaPostRewriterPass, AstNormalizationPass]``. GAMBA's
+  §5.2 algebraic rewriter wraps SimBA on both sides; pre exposes more
+  linear-MBA shapes, post collapses SimBA's verbose conjunction-basis
+  output.
 
-Both factories accept an ``extra_passes`` sequence inserted just before
-the closing :class:`AstNormalizationPass`.
+If a caller needs custom passes that don't fit any of the three modes,
+they construct a :class:`Pipeline` directly and pass it to the
+simplifier via :class:`Simplifier`'s ``pipeline=`` override. The
+factories themselves take no parameters — every mode is a fixed
+composition.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Sequence
 
 from miasm.expression.expression import Expr
@@ -36,6 +44,29 @@ from miasm.expression.expression import Expr
 from msynth.simplification.ast import AbstractSyntaxTreeTranslator
 from msynth.simplification.gamba import GAMBA_POST_REWRITER, GAMBA_PREPROCESSOR
 from msynth.simplification.simba import SimbaPass
+
+
+class PipelineMode(str, Enum):
+    """
+    Pre-defined simplification-pipeline configurations.
+
+    Each value maps to a single factory function and to a corresponding
+    subtree-SimBA behaviour inside the simplifier:
+
+    - :attr:`AST` — :func:`default_pipeline`; subtree-SimBA disabled.
+    - :attr:`SIMBA` — :func:`simba_pipeline`; subtree-SimBA enabled,
+      no GAMBA wrap.
+    - :attr:`GAMBA` — :func:`gamba_pipeline`; subtree-SimBA enabled
+      and wrapped with GAMBA pre/post (matching the global pipeline).
+
+    The enum inherits from :class:`str` so callers may pass the bare
+    literal (e.g. ``Simplifier(pipeline_mode="simba")``) when an enum
+    import is inconvenient.
+    """
+
+    AST = "ast"
+    SIMBA = "simba"
+    GAMBA = "gamba"
 
 
 @dataclass(frozen=True)
@@ -170,8 +201,9 @@ class AstNormalizationPass:
     """
     Convert variadic ``ExprOp`` / ``ExprCompose`` nodes to a strict
     binary tree. Load-bearing for the main simplifier loop, whose
-    ``get_subexpressions`` walk exposes intermediate sub-pairs only when
-    they exist as physical AST nodes. See ``ast.py`` for the translator.
+    ``get_subexpressions`` walk exposes intermediate sub-pair nodes only
+    when they exist as physical AST nodes. See ``ast.py`` for the
+    translator.
     """
 
     name: str = "ast"
@@ -180,63 +212,108 @@ class AstNormalizationPass:
         return AbstractSyntaxTreeTranslator().from_expr(expr)
 
 
-def default_pipeline(
-    extra_passes: Sequence[Any] | None = None,
-) -> Pipeline:
+def default_pipeline() -> Pipeline:
     """
-    Standard simplification pipeline: ``[SimbaPass, *extras,
-    AstNormalizationPass]``.
+    Pure-normalisation pipeline (the ``PipelineMode.AST`` preset).
 
-    :class:`GambaPreprocessingPass` and :class:`GambaPostRewriterPass` are
-    intentionally NOT in the default pipeline. Their §5.2 algebraic rules
-    collapse structural noise into shapes SimBA classifies and reconstructs
-    in conjunction basis, which then defeats oracle-template matching
-    downstream (cf. the demo-MBA regression: 9 -> 24 nodes when the
-    pre/post sandwich is wired into the oracle path). Use them explicitly
-    via :func:`gamba_sandwich_pipeline` below or via ``extra_passes`` when
-    running SimBA-only pipelines without oracle help, or before SimBA in
-    offline benchmarks.
+    Pipeline shape: ``[AstNormalizationPass]``.
 
-    - :class:`SimbaPass` runs linear-MBA reconstruction on whatever
-      SimBA can classify. SimBA's classifier, cube evaluator, and
-      reconstruction are all arity-tolerant — they operate on
-      ``expr.args`` as a uniform iterable — so SimBA does not require
-      binarised input.
-    - :class:`AstNormalizationPass` at the *tail* binarises whatever
-      SimBA emits (variadic by construction; see ``_sum`` / ``_or`` /
-      ``_xor`` / ``_conjunction`` in simba.py) before the main
-      simplifier loop's ``get_subexpressions`` walk runs. That walk
-      only exposes intermediate sub-pair nodes when they exist as
-      physical AST nodes, so binarising the tree at the boundary
-      maximises the oracle's lookup surface on multi-arg sums.
+    The single pass binarises variadic :class:`ExprOp` /
+    :class:`ExprCompose` nodes into a strict binary tree. That binary
+    form is load-bearing for the main simplifier loop: its
+    ``get_subexpressions`` walk only exposes intermediate sub-pair nodes
+    when they physically exist in the AST, and the oracle lookup is
+    keyed on those sub-pair shapes.
+
+    No simplification work is done here — this pipeline is the right
+    choice when:
+
+    - You only care about the oracle lookup (the simplifier loop will
+      still query :class:`Simplifier.oracle` for every subtree).
+    - You want a baseline against which SIMBA / GAMBA modes are
+      measured.
+    - You're running CEGIS-only and the SimBA pre-pass would just be
+      wasted work on shapes SimBA can't classify.
     """
-    return Pipeline([SimbaPass(), *(extra_passes or ()), AstNormalizationPass()])
+    return Pipeline([AstNormalizationPass()])
 
 
-def gamba_sandwich_pipeline(
-    extra_passes: Sequence[Any] | None = None,
-) -> Pipeline:
+def simba_pipeline() -> Pipeline:
     """
-    Alternative pipeline with GAMBA pre/post sandwich around SimbaPass:
-    ``[GambaPreprocessingPass, SimbaPass, GambaPostRewriterPass, *extras,
-    AstNormalizationPass]``.
+    SimBA linear-MBA reconstruction pipeline (the ``PipelineMode.SIMBA``
+    preset).
 
-    The pre/post pair runs the §5.2 algebraic rule set before and after
-    SimBA's cube reconstruction. The post pass runs BEFORE the binariser
-    so the algebraic rules see the natural variadic shape SimBA emits.
+    Pipeline shape: ``[SimbaPass, AstNormalizationPass]``.
 
-    Use this for SimBA-only / no-oracle pipelines where the oracle
-    pattern-matching argument doesn't apply. NOT the default because the
-    GAMBA-pre transforms shapes into the SimBA-classifier accept set,
-    which then produces verbose conjunction-basis output the oracle path
-    cannot fold further.
+    Phase-by-phase rationale:
+
+    1. **SimbaPass** — runs on the raw input. SimBA's classifier, cube
+       evaluator, and reconstruction are all *arity-tolerant*: they
+       operate on ``expr.args`` as a uniform iterable, so SimBA does not
+       require binarised input. Running SimBA first means it sees the
+       expression in its natural (possibly variadic) form, which keeps
+       its atom set tight and avoids the overhead of an upstream
+       binariser.
+
+    2. **AstNormalizationPass** — runs LAST. SimBA's reconstruction
+       helpers (``_sum`` / ``_or`` / ``_xor`` / ``_conjunction`` in
+       ``simba.py``) emit variadic :class:`ExprOp` nodes; the binariser
+       splits those into a strict binary tree so the simplifier loop's
+       ``get_subexpressions`` walk can expose intermediate sub-pair
+       nodes for oracle lookup.
+
+    Nothing else belongs between these two. Any algebraic refinement of
+    SimBA's output is the GAMBA post-rewriter's job and lives in the
+    next preset up.
+    """
+    return Pipeline([SimbaPass(), AstNormalizationPass()])
+
+
+def gamba_pipeline() -> Pipeline:
+    """
+    GAMBA pre/post sandwich around SimBA (the ``PipelineMode.GAMBA``
+    preset).
+
+    Pipeline shape: ``[GambaPreprocessingPass, SimbaPass,
+    GambaPostRewriterPass, AstNormalizationPass]``.
+
+    Phase-by-phase rationale:
+
+    1. **GambaPreprocessingPass** — applies all 53 ``guarded=False``
+       algebraic rules (idempotence, absorption, two-complement,
+       inverse-element, the Tier 3 GAMBA additions) in a bottom-up
+       fixpoint. Every safe rule is no-grow on its matching input, so
+       this phase only ever collapses structure. The collapse exposes
+       more linear-MBA shapes to SimBA's classifier — patterns that
+       would have been rejected as "not linear" in their raw obfuscated
+       form become classifiable after idempotence / De Morgan / etc.
+       fire. Explicitly EXCLUDES the two guarded rules (ring/factor)
+       because they distribute or factor in ways that widen SimBA's
+       atom set on the cube.
+
+    2. **SimbaPass** — same role as in :func:`simba_pipeline`, but now
+       fed shapes the pre-pass has already collapsed. Empirically lifts
+       reduction by +1.6 to +2.1pp on the corpus and exact-match by
+       +6.2 to +6.4pp (see ``tmp/gamba_sweep_report.md``).
+
+    3. **GambaPostRewriterPass** — runs the same safe-rule fixpoint as
+       the pre-pass PLUS the two ``guarded=True`` rules
+       (``ring_normalize``, ``factor_common_subterm``) with their
+       net-shrink checks. Collapses SimBA's verbose conjunction-basis
+       output back into compact forms. Must run BEFORE binarisation
+       because the §5.2 algebraic rules pattern-match on n-ary
+       :class:`ExprOp` shapes (multiple duplicate children, coefficient
+       collection across many summands); running them after the
+       binariser would force every rule to re-flatten internally.
+
+    4. **AstNormalizationPass** — final binariser, same role as in
+       :func:`default_pipeline` and :func:`simba_pipeline`.
     """
     return Pipeline(
         [
             GambaPreprocessingPass(),
             SimbaPass(),
             GambaPostRewriterPass(),
-            *(extra_passes or ()),
             AstNormalizationPass(),
         ]
     )

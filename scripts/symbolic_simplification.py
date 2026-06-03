@@ -7,7 +7,7 @@ from miasm.analysis.machine import Machine
 from miasm.core.locationdb import LocationDB
 from miasm.ir.symbexec import SymbolicExecutionEngine
 
-from msynth import Simplifier
+from msynth import PipelineMode, Simplifier
 
 
 logger = logging.getLogger("msynth")
@@ -54,7 +54,7 @@ def main(file_path: Path, start_addr: int, oracle_path: Path) -> None:
     sb.run_block_at(ira_cfg, start_addr)
 
     # initialize simplifier
-    simplifier = Simplifier(oracle_path)
+    simplifier = Simplifier(oracle_path, pipeline_mode=PipelineMode.SIMBA)
 
     for k, v in sb.modified():
         if v.is_int() or v.is_id() or v.is_loc():

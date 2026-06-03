@@ -19,6 +19,7 @@ from miasm.expression.expression import Expr  # noqa: E402
 from miasm.expression.simplifications import expr_simp  # noqa: E402
 
 from msynth.parsing import parse_infix_expr  # noqa: E402
+from msynth.simplification.pipeline import PipelineMode  # noqa: E402
 from msynth.simplification.simplifier import Simplifier  # noqa: E402
 from msynth.utils.expr_utils import get_subexpressions  # noqa: E402
 
@@ -127,6 +128,7 @@ def init_worker(
     global _SIMPLIFIER
     _SIMPLIFIER = Simplifier(
         Path(oracle_path),
+        pipeline_mode=PipelineMode.SIMBA,
         solver_timeout=solver_timeout,
         enforce_equivalence=enforce_equivalence,
     )

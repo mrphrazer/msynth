@@ -8,6 +8,7 @@ from miasm.expression.expression import ExprId, ExprInt, ExprLoc, ExprOp, LocKey
 from miasm.expression.simplifications import expr_simp
 
 from msynth.simplification.oracle import SimplificationOracle
+from msynth.simplification.pipeline import PipelineMode
 from msynth.simplification.simplifier import Simplifier
 
 
@@ -194,12 +195,13 @@ def test_is_suitable_simplification_candidate_rejects_sat(monkeypatch) -> None:
     assert not simplifier._is_suitable_simplification_candidate(expr, simplified)
 
 
-def test_subtree_simba_fallback_simplifies_on_empty_oracle() -> None:
-    # With an empty oracle, no pre-computed equivalence class can ever match.
-    # An inner linear MBA wrapped in a non-constant right shift cannot be
-    # simplified by the global SimbaPass either (the root op is outside the
-    # linear-MBA fragment). The only path that can produce a simplification
-    # is the subtree-level SiMBA fallback, applied to the inner subtree.
+def test_subtree_simba_fallback_simplifies_inner_linear_mba() -> None:
+    # The default Simplifier holds an empty oracle, so no pre-computed
+    # equivalence class can ever match. An inner linear MBA wrapped in a
+    # non-constant right shift cannot be simplified by the global
+    # SimbaPass either (the root op is outside the linear-MBA fragment).
+    # The only path that can produce a simplification is the subtree-
+    # level SiMBA fallback, applied to the inner subtree.
     size = 64
     x = ExprId("x", size)
     y = ExprId("y", size)
@@ -207,7 +209,7 @@ def test_subtree_simba_fallback_simplifies_on_empty_oracle() -> None:
     inner = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
     expr = ExprOp(">>", inner, shift)
 
-    simplifier = Simplifier(enable_subtree_simba=True)
+    simplifier = Simplifier(pipeline_mode=PipelineMode.SIMBA)
     simplified = simplifier.simplify(expr)
 
     # Inner (x & y) + (x | y) collapses to (x + y); outer >> shift remains.
@@ -216,10 +218,11 @@ def test_subtree_simba_fallback_simplifies_on_empty_oracle() -> None:
     assert _nodes(simplified) < _nodes(expr)
 
 
-def test_subtree_simba_disabled_leaves_inner_linear_mba_untouched() -> None:
-    # Counterproof for the previous test: with subtree-SiMBA disabled and an
-    # empty oracle, no path can match the inner subtree, so the expression
-    # must come back unchanged.
+def test_ast_mode_leaves_inner_linear_mba_untouched() -> None:
+    # Counterproof for the previous test: under PipelineMode.AST (the
+    # default), subtree-SiMBA is disabled. With no pre-computed oracle
+    # match and no SimBA fallback, the expression must come back
+    # unchanged.
     size = 64
     x = ExprId("x", size)
     y = ExprId("y", size)
@@ -227,7 +230,7 @@ def test_subtree_simba_disabled_leaves_inner_linear_mba_untouched() -> None:
     inner = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
     expr = ExprOp(">>", inner, shift)
 
-    simplifier = Simplifier(enable_subtree_simba=False)
+    simplifier = Simplifier()
     simplified = simplifier.simplify(expr)
 
     assert simplified == expr
@@ -236,14 +239,15 @@ def test_subtree_simba_disabled_leaves_inner_linear_mba_untouched() -> None:
 def test_subtree_simba_respects_op_whitelist() -> None:
     # The non-constant shift at the root is outside the operator whitelist,
     # so subtree-SiMBA must reject it regardless of size or variable count.
-    # Combined with an empty oracle, this proves the whitelist is enforced:
-    # the only candidate subtree is a leaf chain and nothing fires.
+    # Combined with the empty default oracle, this proves the whitelist
+    # is enforced: the only candidate subtree is a leaf chain and nothing
+    # fires.
     size = 64
     x = ExprId("x", size)
     shift = ExprId("shift", size)
     expr = ExprOp(">>", x, shift)
 
-    simplifier = Simplifier(enable_subtree_simba=True)
+    simplifier = Simplifier(pipeline_mode=PipelineMode.SIMBA)
     simplified = simplifier.simplify(expr)
 
     assert simplified == expr
@@ -264,7 +268,7 @@ def test_subtree_simba_skips_placeholder_terminals() -> None:
     #
     # See ``test_simplifier_demo_mba_reaches_shortest_form_with_placeholder_guard``
     # for the end-to-end regression that motivates this guard.
-    simplifier = Simplifier(enable_subtree_simba=True)
+    simplifier = Simplifier(pipeline_mode=PipelineMode.SIMBA)
 
     size = 64
     g0 = simplifier._gen_global_variable_replacement(0, size)
@@ -410,9 +414,57 @@ def test_subtree_simba_respects_node_limit() -> None:
     expr = ExprOp(">>", inner, shift)
 
     simplifier = Simplifier(
-        enable_subtree_simba=True,
+        pipeline_mode=PipelineMode.SIMBA,
         subtree_simba_max_nodes=4,
     )
     simplified = simplifier.simplify(expr)
 
     assert simplified == expr
+
+
+# ---------------------------------------------------------------------------
+# Constructor: oracle + pipeline-mode + subtree-SimBA coupling
+# ---------------------------------------------------------------------------
+
+
+def test_simplifier_default_oracle_is_empty_in_memory() -> None:
+    # No oracle_path → in-memory empty oracle. Lookups never match;
+    # simplifications come from the pipeline / CEGIS only.
+    sim = Simplifier()
+    assert isinstance(sim.oracle, SimplificationOracle)
+    assert sim.oracle.oracle_map == {}
+
+
+def test_simplifier_oracle_loaded_when_path_provided(tmp_path: Path) -> None:
+    sim = Simplifier(_write_min_oracle(tmp_path))
+    assert isinstance(sim.oracle, SimplificationOracle)
+    assert sim.oracle.num_variables == 1
+    assert sim.oracle.num_samples == 3
+
+
+def test_simplifier_pipeline_mode_ast_disables_subtree_simba() -> None:
+    sim = Simplifier(pipeline_mode=PipelineMode.AST)
+    assert sim._subtree_simba_pass is None
+
+
+def test_simplifier_pipeline_mode_simba_enables_subtree_simba() -> None:
+    sim = Simplifier(pipeline_mode=PipelineMode.SIMBA)
+    assert sim._subtree_simba_pass is not None
+    assert sim._pipeline_mode == PipelineMode.SIMBA
+
+
+def test_simplifier_pipeline_mode_gamba_enables_subtree_simba() -> None:
+    sim = Simplifier(pipeline_mode=PipelineMode.GAMBA)
+    assert sim._subtree_simba_pass is not None
+    assert sim._pipeline_mode == PipelineMode.GAMBA
+
+
+def test_simplifier_accepts_string_pipeline_mode_literals() -> None:
+    # ``PipelineMode`` inherits from ``str`` so callers may pass the
+    # bare literal when an enum import is inconvenient.
+    sim = Simplifier(pipeline_mode="simba")
+    assert sim._pipeline_mode == PipelineMode.SIMBA
+    assert [type(p).__name__ for p in sim.pipeline.passes] == [
+        "SimbaPass",
+        "AstNormalizationPass",
+    ]

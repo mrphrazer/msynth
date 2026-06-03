@@ -793,6 +793,25 @@ def test_rule_output_is_equivalent_to_input(rule: RewriteRule) -> None:
     _assert_sound(inp, out, rule.name)
 
 
+@pytest.mark.parametrize("rule", DEFAULT_RULES, ids=lambda r: r.name)
+def test_rule_is_idempotent_on_its_own_output(rule: RewriteRule) -> None:
+    """
+    Applying a rule to its own output must reach a fixed point in one
+    step: either the rule rejects (returns None — already canonical) or
+    it returns the same shape it produced before. Otherwise the rule
+    would loop the engine when run in fixpoint mode.
+    """
+    inp = _matching_input(rule)
+    once = rule.apply(inp)
+    assert once is not None, f"{rule.name} unexpectedly rejected its matching input"
+    twice = rule.apply(once)
+    # Either the rule rejects (None) or returns the same shape.
+    assert twice is None or twice == once, (
+        f"{rule.name} is not idempotent on its own output:\n"
+        f"  once={once}\n  twice={twice}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rewriter integration
 # ---------------------------------------------------------------------------
