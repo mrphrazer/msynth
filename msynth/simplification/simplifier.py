@@ -9,7 +9,7 @@ from miasm.ir.translators.z3_ir import TranslatorZ3
 
 from msynth.simplification.ast import AbstractSyntaxTreeTranslator
 from msynth.simplification.oracle import SimplificationOracle
-from msynth.simplification.preprocessing import Preprocessor, default_preprocessor
+from msynth.simplification.pipeline import Pipeline, default_pipeline
 from msynth.simplification.cegis import CegisSolver, TemplateOracle
 from msynth.simplification.simba import SimbaPass
 from msynth.utils.expr_utils import (
@@ -17,6 +17,7 @@ from msynth.utils.expr_utils import (
     get_unique_variables,
     is_strictly_smaller_tree,
 )
+from msynth.simplification.gamba import GAMBA_POST_REWRITER, GAMBA_PREPROCESSOR
 from msynth.simplification.rewrites import DEFAULT_REWRITER
 from msynth.utils.sampling import has_adversarial_counterexample
 from msynth.utils.unification import gen_unification_dict, reverse_unification
@@ -77,7 +78,7 @@ class Simplifier:
         oracle_path: Path,
         enforce_equivalence: bool = False,
         solver_timeout: int = 1,
-        preprocessor: Preprocessor | None = None,
+        pipeline: Pipeline | None = None,
         enable_subtree_simba: bool = True,
         subtree_simba_max_vars: int = 5,
         subtree_simba_max_nodes: int = 30,
@@ -98,12 +99,11 @@ class Simplifier:
             oracle_path: File path to pre-computed simplification oracle.
             enforce_equivalence: Flag to enforce semantic equivalence checks before replacements.
             solver_timeout: SMT solver timeout in seconds.
-            preprocessor: Optional preprocessing pipeline applied before oracle simplification.
+            pipeline: Optional simplification pipeline applied before oracle simplification.
             enable_subtree_simba: Enable SimbaPass as a fallback on oracle misses
                 during the simplification loop. The global SimbaPass in the
-                preprocessing pipeline runs once over the whole expression; this
-                fallback applies it to inner subtrees that the oracle did not
-                match.
+                pipeline runs once over the whole expression; this fallback
+                applies it to inner subtrees that the oracle did not match.
             subtree_simba_max_vars: Skip subtree SiMBA when the unification dict
                 has more than this many terminals.
             subtree_simba_max_nodes: Skip subtree SiMBA when the Miasm graph of
@@ -134,8 +134,8 @@ class Simplifier:
         self.oracle = SimplificationOracle.load_from_file(oracle_path)
         self.enforce_equivalence = enforce_equivalence
         self.solver_timeout = solver_timeout
-        extra_passes = None if preprocessor is None else preprocessor.passes
-        self.preprocessor = default_preprocessor(extra_passes)
+        extra_passes = None if pipeline is None else pipeline.passes
+        self.pipeline = default_pipeline(extra_passes)
 
         # internal attributes
         self._translator_z3 = TranslatorZ3()
@@ -367,9 +367,16 @@ class Simplifier:
         if not self._is_simba_op_candidate(subtree):
             return None
 
-        simplified = self._subtree_simba_pass.run(subtree)
-        if simplified == subtree:
+        # Pre/post sandwich around the subtree SimBA call mirrors the
+        # global pipeline: collapse algebraic structure both before SimBA
+        # classifies and after its reconstruction emits. Pre-pass exposes
+        # more linear-MBA shapes to SimBA; post-pass re-collapses SimBA's
+        # conjunction-basis output.
+        preprocessed = GAMBA_PREPROCESSOR.normalize(subtree)
+        simplified = self._subtree_simba_pass.run(preprocessed)
+        if simplified == preprocessed:
             return None
+        simplified = GAMBA_POST_REWRITER.normalize(simplified)
         # SimBA's reconstruction helpers (_sum, _or, _xor, _conjunction
         # in simba.py) emit variadic ExprOps. Re-binarise before
         # returning so the candidate respects the main loop's binary-
@@ -512,7 +519,7 @@ class Simplifier:
             Simplified expression
         """
         # transform expr to the preprocessed abstract syntax tree
-        ast = self.preprocessor.run(expr)
+        ast = self.pipeline.run(expr)
         # dictionary to map to placeholder variables to simplified subtrees
         global_unification_dict: Dict[Expr, Expr] = {}
         # placeholder variable counter

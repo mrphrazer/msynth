@@ -4,10 +4,10 @@ from .parsing import (
     parse_dataset_line,
     parse_infix_expr,
 )
-from .simplification.preprocessing import (
+from .simplification.pipeline import (
     AstNormalizationPass,
-    Preprocessor,
-    default_preprocessor,
+    Pipeline,
+    default_pipeline,
 )
 from .simplification.simba import SimbaPass
 from .simplification.oracle import SimplificationOracle
@@ -17,12 +17,12 @@ from .synthesis.synthesizer import Synthesizer
 __all__ = [
     "AstNormalizationPass",
     "ParsedDatasetRow",
-    "Preprocessor",
+    "Pipeline",
     "SimbaPass",
     "SimplificationOracle",
     "Simplifier",
     "Synthesizer",
-    "default_preprocessor",
+    "default_pipeline",
     "iter_dataset_file",
     "parse_dataset_line",
     "parse_infix_expr",

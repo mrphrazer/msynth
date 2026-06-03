@@ -7,10 +7,10 @@ from pathlib import Path
 from miasm.expression.expression import Expr, ExprId, ExprInt, ExprOp
 
 from msynth.simplification.oracle import SimplificationOracle
-from msynth.simplification.preprocessing import (
+from msynth.simplification.pipeline import (
     AstNormalizationPass,
-    Preprocessor,
-    default_preprocessor,
+    Pipeline,
+    default_pipeline,
 )
 from msynth.simplification.simba import SimbaPass
 from msynth.simplification.simplifier import Simplifier
@@ -39,7 +39,7 @@ def test_ast_normalization_pass_splits_variadic_expression() -> None:
     assert rewritten == ExprOp("+", ExprOp("+", x, y), z)
 
 
-def test_preprocessor_runs_passes_in_order() -> None:
+def test_pipeline_runs_passes_in_order() -> None:
     x = ExprId("x", 8)
     seen: list[str] = []
 
@@ -51,13 +51,13 @@ def test_preprocessor_runs_passes_in_order() -> None:
             seen.append(self.name)
             return expr
 
-    preprocessor = Preprocessor([RecordingPass("first"), RecordingPass("second")])
+    pipeline = Pipeline([RecordingPass("first"), RecordingPass("second")])
 
-    assert preprocessor.run(x) == x
+    assert pipeline.run(x) == x
     assert seen == ["first", "second"]
 
 
-def test_default_preprocessor_order() -> None:
+def test_default_pipeline_order() -> None:
     # Pipeline shape: [SimbaPass, *extras, AstNormalizationPass].
     # SimBA runs on the raw input (arity-tolerant; no binarisation
     # needed upstream). AstNorm at the *tail* binarises whatever SimBA
@@ -65,13 +65,13 @@ def test_default_preprocessor_order() -> None:
     # the main simplifier loop's get_subexpressions walk needs the
     # binary form to expose intermediate sub-pair nodes for oracle
     # lookup.
-    preprocessor = default_preprocessor()
+    pipeline = default_pipeline()
 
-    assert isinstance(preprocessor.passes[0], SimbaPass)
-    assert isinstance(preprocessor.passes[-1], AstNormalizationPass)
+    assert isinstance(pipeline.passes[0], SimbaPass)
+    assert isinstance(pipeline.passes[-1], AstNormalizationPass)
 
 
-def test_simplifier_applies_optional_preprocessor(tmp_path: Path) -> None:
+def test_simplifier_applies_optional_pipeline(tmp_path: Path) -> None:
     @dataclass(frozen=True)
     class ConstantPass:
         name: str = "constant"
@@ -81,24 +81,24 @@ def test_simplifier_applies_optional_preprocessor(tmp_path: Path) -> None:
             return ExprInt(7, 8)
 
     simplifier = Simplifier(
-        _write_min_oracle(tmp_path), preprocessor=Preprocessor([ConstantPass()])
+        _write_min_oracle(tmp_path), pipeline=Pipeline([ConstantPass()])
     )
 
     assert simplifier.simplify(ExprId("x", 8)) == ExprInt(7, 8)
 
 
-def test_simplifier_uses_default_preprocessor_order(tmp_path: Path) -> None:
+def test_simplifier_uses_default_pipeline_order(tmp_path: Path) -> None:
     simplifier = Simplifier(_write_min_oracle(tmp_path))
 
-    assert isinstance(simplifier.preprocessor.passes[0], SimbaPass)
-    assert isinstance(simplifier.preprocessor.passes[-1], AstNormalizationPass)
+    assert isinstance(simplifier.pipeline.passes[0], SimbaPass)
+    assert isinstance(simplifier.pipeline.passes[-1], AstNormalizationPass)
 
 
-def test_default_preprocessor_runs_simba_after_ast_normalization() -> None:
+def test_default_pipeline_runs_simba_after_ast_normalization() -> None:
     x = ExprId("x", 8)
     y = ExprId("y", 8)
 
-    rewritten = default_preprocessor().run(
+    rewritten = default_pipeline().run(
         ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
     )
 

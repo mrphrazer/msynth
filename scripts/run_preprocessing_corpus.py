@@ -19,9 +19,9 @@ from miasm.expression.expression import Expr  # noqa: E402
 from miasm.expression.simplifications import expr_simp  # noqa: E402
 
 from msynth.parsing import parse_infix_expr  # noqa: E402
-from msynth.simplification.preprocessing import (  # noqa: E402
+from msynth.simplification.pipeline import (  # noqa: E402
     AstNormalizationPass,
-    Preprocessor,
+    Pipeline,
 )
 from msynth.simplification.simba import SimbaPass  # noqa: E402
 from msynth.utils.expr_utils import get_subexpressions  # noqa: E402
@@ -29,7 +29,7 @@ from msynth.utils.expr_utils import get_subexpressions  # noqa: E402
 DEFAULT_CORPUS = REPO_ROOT / "datasets" / "corpora" / "cobra.jsonl.gz"
 DEFAULT_JOBS = os.cpu_count() or 1
 
-_PREPROCESSOR: Preprocessor | None = None
+_PREPROCESSOR: Pipeline | None = None
 
 
 @dataclass(frozen=True)
@@ -137,7 +137,7 @@ def node_count(expr: Expr) -> int:
 
 def init_worker() -> None:
     global _PREPROCESSOR
-    _PREPROCESSOR = Preprocessor([AstNormalizationPass(), SimbaPass()])
+    _PREPROCESSOR = Pipeline([AstNormalizationPass(), SimbaPass()])
 
 
 def check_record(record: CorpusRecord) -> CheckResult:
