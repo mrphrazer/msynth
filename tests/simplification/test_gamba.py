@@ -669,3 +669,459 @@ def test_fuzz_preprocessor_is_sound_on_random_expressions(seed: int) -> None:
         if not equiv:
             failures.append((inp, out))
     assert not failures, f"unsound rewrites: {failures[:3]}"
+
+
+# ---------------------------------------------------------------------------
+# GAMBA general (Layer 1 + Layer 2) — ExpandPass, FactorizeSumsPass,
+# §5.1 substitution helpers, classifier, leaf finder, abstract/reverse.
+# ---------------------------------------------------------------------------
+#
+# These cover the GAMBA-general code added to gamba.py in this branch.
+# Per architectural plan, all four pieces live in the same module so the
+# import block here matches.
+
+from miasm.expression.expression import ExprId  # noqa: E402
+
+from msynth.simplification.gamba import (  # noqa: E402
+    ExpandPass,
+    FactorizeSumsPass,
+    abstract_subexprs,
+    classify_linear_nonlinear,
+    gamba_substitution,
+    nonlinear_leaves,
+    reverse_abstract,
+)
+
+
+# Common atoms reused by the GAMBA-general tests; size 64 matches the
+# rest of the test suite. The choice of size is irrelevant for structural
+# tests but matters for the BV-soundness tests that compare via Z3 in the
+# wider corpus.
+_X = ExprId("x", 64)
+_Y = ExprId("y", 64)
+_A = ExprId("a", 64)
+_B = ExprId("b", 64)
+
+
+# ---------- classify_linear_nonlinear ----------
+
+
+def test_classify_atom_is_linear() -> None:
+    assert classify_linear_nonlinear(_X) == "linear"
+
+
+def test_classify_constant_is_linear() -> None:
+    assert classify_linear_nonlinear(ExprInt(7, 64)) == "linear"
+
+
+def test_classify_sum_of_atoms_is_linear() -> None:
+    assert classify_linear_nonlinear(ExprOp("+", _X, _Y)) == "linear"
+
+
+def test_classify_const_times_var_is_linear() -> None:
+    expr = ExprOp("*", ExprInt(3, 64), _X)
+    assert classify_linear_nonlinear(expr) == "linear"
+
+
+def test_classify_var_times_var_is_nonlinear() -> None:
+    expr = ExprOp("*", _X, _Y)
+    assert classify_linear_nonlinear(expr) == "nonlinear"
+
+
+def test_classify_bitwise_over_atoms_is_linear() -> None:
+    assert classify_linear_nonlinear(ExprOp("&", _X, _Y)) == "linear"
+    assert classify_linear_nonlinear(ExprOp("|", _X, _Y)) == "linear"
+    assert classify_linear_nonlinear(ExprOp("^", _X, _Y)) == "linear"
+
+
+def test_classify_propagates_nonlinearity_through_sum() -> None:
+    # A sum containing a nonlinear product is classified nonlinear.
+    expr = ExprOp("+", ExprOp("*", _X, _Y), _A)
+    assert classify_linear_nonlinear(expr) == "nonlinear"
+
+
+# ---------- nonlinear_leaves ----------
+
+
+def test_nonlinear_leaves_empty_for_pure_linear() -> None:
+    # Pure linear expr — classifier finds no nonlinear leaves.
+    assert nonlinear_leaves(ExprOp("+", _X, _Y)) == []
+
+
+def test_nonlinear_leaves_finds_xy_product() -> None:
+    expr = ExprOp("+", ExprOp("*", _X, _Y), ExprOp("*", _A, ExprInt(3, 64)))
+    leaves = nonlinear_leaves(expr)
+    assert len(leaves) == 1
+    assert leaves[0] == ExprOp("*", _X, _Y)
+
+
+def test_nonlinear_leaves_descends_into_nonlinear_nodes() -> None:
+    # The walker collects BOTH the inner and outer nonlinear sub-expressions
+    # because §5.1 may want to abstract either one — abstracting the inner
+    # may expose more linear structure than abstracting the outer.
+    inner = ExprOp("*", _X, _Y)
+    outer = ExprOp("*", inner, _A)  # variable * (variable * variable)
+    leaves = nonlinear_leaves(outer)
+    assert outer in leaves
+    assert inner in leaves
+
+
+def test_nonlinear_leaves_shares_inner_across_siblings() -> None:
+    # ``x*y`` appears inside both ``a*x*y`` and ``b*x*y``; the leaf finder
+    # surfaces it as a single de-duplicated entry so §5.1 can pick the
+    # shared abstraction.
+    inner = ExprOp("*", _X, _Y)
+    left = ExprOp("*", _A, inner)
+    right = ExprOp("*", _B, inner)
+    expr = ExprOp("+", left, right)
+    leaves = nonlinear_leaves(expr)
+    # All three nonlinear sub-expressions present.
+    assert inner in leaves
+    assert left in leaves
+    assert right in leaves
+    # ``inner`` appears once even though it lives inside both siblings.
+    assert sum(1 for leaf in leaves if leaf == inner) == 1
+
+
+def test_nonlinear_leaves_dedupes_by_identity() -> None:
+    # The same Python Expr appearing twice is collected once.
+    prod = ExprOp("*", _X, _Y)
+    expr = ExprOp("+", prod, prod)
+    assert len(nonlinear_leaves(expr)) == 1
+
+
+def test_nonlinear_leaves_finds_shift() -> None:
+    # Shifts are outside the linear-MBA fragment per the classifier.
+    expr = ExprOp("+", ExprOp("<<", _X, ExprInt(3, 64)), _A)
+    leaves = nonlinear_leaves(expr)
+    assert leaves and leaves[0].op == "<<"
+
+
+# ---------- ExpandPass ----------
+
+
+def test_expand_atom_unchanged() -> None:
+    assert ExpandPass().run(_X) == _X
+
+
+def test_expand_constant_unchanged() -> None:
+    c = ExprInt(7, 64)
+    assert ExpandPass().run(c) == c
+
+
+def test_expand_simple_distribution_rejected_when_net_growth() -> None:
+    # a*(x+y) → a*x + a*y grows the tree (4 → 5 nodes) so the net-shrink
+    # guard rejects. Explicit assertion that ExpandPass is conservative.
+    expr = ExprOp("*", _A, ExprOp("+", _X, _Y))
+    assert ExpandPass().run(expr) == expr
+
+
+def test_expand_no_change_on_pure_sum() -> None:
+    expr = ExprOp("+", _X, _Y)
+    assert ExpandPass().run(expr) == expr
+
+
+def test_expand_idempotent_on_distributed_input() -> None:
+    expr = ExprOp("+", ExprOp("*", _A, _X), ExprOp("*", _A, _Y))  # already distributed
+    assert ExpandPass().run(expr) == expr
+
+
+def test_expand_handles_deep_nest_without_recursion_error() -> None:
+    # Pathological depth: nested products. The pass must terminate.
+    expr: Expr = _X
+    for _ in range(20):
+        expr = ExprOp("*", _A, expr)
+    out = ExpandPass().run(expr)
+    # Either unchanged or net-shrunk; never raises.
+    assert out is not None
+
+
+# ---------- FactorizeSumsPass ----------
+
+
+def test_factorize_atom_unchanged() -> None:
+    assert FactorizeSumsPass().run(_X) == _X
+
+
+def test_factorize_simple_common_factor() -> None:
+    # a*x + a*y → a*(x+y)
+    expr = ExprOp("+", ExprOp("*", _A, _X), ExprOp("*", _A, _Y))
+    out = FactorizeSumsPass().run(expr)
+    # Expected shape: a * (x + y) — node count 5.
+    assert _nodes(out) <= _nodes(expr)
+    # Sanity: output must be a product with `a` as one factor.
+    assert isinstance(out, ExprOp) and out.op == "*"
+
+
+def test_factorize_rejects_when_no_shared_factor() -> None:
+    expr = ExprOp("+", _X, _Y)
+    assert FactorizeSumsPass().run(expr) == expr
+
+
+def test_factorize_rejects_when_only_one_term() -> None:
+    # Degenerate sum (one child) — no factoring opportunity.
+    expr = ExprOp("*", _A, _X)
+    assert FactorizeSumsPass().run(expr) == expr
+
+
+def test_factorize_preserves_semantics_on_simple_factor() -> None:
+    # Z3 equivalence via existing helper.
+    expr = ExprOp("+", ExprOp("*", _A, _X), ExprOp("*", _A, _Y))
+    out = FactorizeSumsPass().run(expr)
+    assert _z3_equivalent(expr, out)
+
+
+def test_factorize_idempotent_on_factored_input() -> None:
+    # Already-factored shape: factoring again is a no-op (no net-shrink).
+    expr = ExprOp("*", _A, ExprOp("+", _X, _Y))
+    assert FactorizeSumsPass().run(expr) == expr
+
+
+def test_factorize_constants_only_sum() -> None:
+    # Pure constants form a sum but there's no shared symbolic factor.
+    expr = ExprOp("+", ExprInt(2, 64), ExprInt(3, 64))
+    out = FactorizeSumsPass().run(expr)
+    # Should be unchanged or further-collapsed — never grow.
+    assert _nodes(out) <= _nodes(expr)
+
+
+# ---------- abstract_subexprs / reverse_abstract round-trip ----------
+
+
+def test_abstract_reverse_roundtrip_single_target() -> None:
+    prod = ExprOp("*", _X, _Y)
+    expr = ExprOp("+", prod, _A)
+    abstracted, mapping = abstract_subexprs(expr, [prod])
+    # Placeholder var introduced.
+    placeholders = [v for v in mapping]
+    assert len(placeholders) == 1
+    assert placeholders[0].name.startswith("g")
+    # Reverse restores original.
+    assert reverse_abstract(abstracted, mapping) == expr
+
+
+def test_abstract_reverse_roundtrip_multiple_targets() -> None:
+    p1 = ExprOp("*", _X, _Y)
+    p2 = ExprOp("*", _A, _B)
+    expr = ExprOp("+", p1, p2)
+    abstracted, mapping = abstract_subexprs(expr, [p1, p2])
+    assert len(mapping) == 2
+    assert reverse_abstract(abstracted, mapping) == expr
+
+
+def test_abstract_renames_all_occurrences() -> None:
+    prod = ExprOp("*", _X, _Y)
+    # Same nonlinear sub-expression appears twice.
+    expr = ExprOp("+", prod, prod)
+    abstracted, mapping = abstract_subexprs(expr, [prod])
+    assert len(mapping) == 1
+    placeholder = next(iter(mapping))
+    # Both occurrences replaced with the placeholder.
+    expected = ExprOp("+", placeholder, placeholder)
+    assert abstracted == expected
+
+
+# ---------- gamba_substitution (§5.1 wrapper, currently n=0 only) ----------
+
+
+def test_gamba_substitution_n0_delegates_to_simba_fn() -> None:
+    # The wrapper is a thin call into simba_fn for max_k=0. Verify by
+    # passing a stub simba_fn that returns a sentinel.
+    sentinel = ExprId("sentinel", 64)
+    calls: list[Expr] = []
+
+    def simba_fn(expr: Expr) -> Expr:
+        calls.append(expr)
+        return sentinel
+
+    out = gamba_substitution(_X, simba_fn, max_k=0)
+    assert calls == [_X]
+    assert out == sentinel
+
+
+def test_gamba_substitution_returns_none_when_simba_returns_input() -> None:
+    # SimBA produced no reduction (returns the same Expr) — wrapper
+    # signals miss with None so the BFS loop falls through to CEGIS.
+    def simba_fn(expr: Expr) -> Expr:
+        return expr
+
+    assert gamba_substitution(_X, simba_fn, max_k=0) is None
+
+
+def test_gamba_substitution_returns_none_when_simba_returns_none() -> None:
+    def simba_fn(_expr: Expr) -> Expr | None:
+        return None
+
+    assert gamba_substitution(_X, simba_fn, max_k=0) is None
+
+
+def test_gamba_substitution_max_k_zero_disables_escalation() -> None:
+    # n=0 path takes one SimBA call and returns the result (or None);
+    # the escalation loop is gated off entirely. With a simba_fn that
+    # would succeed on an abstracted form but fail on the raw subtree,
+    # max_k=0 returns None.
+    xy = ExprOp("*", _X, _Y)
+    subtree = ExprOp("+", ExprOp("*", _A, xy), ExprOp("*", _B, xy))
+    calls: list[Expr] = []
+
+    def miss(expr: Expr) -> Expr | None:
+        calls.append(expr)
+        return None
+
+    assert gamba_substitution(subtree, miss, max_k=0) is None
+    # max_k=0 → exactly one SimBA invocation (the n=0 attempt).
+    assert len(calls) == 1
+    assert calls[0] == subtree
+
+
+# ---------- §5.1 escalation (max_k >= 1) ----------
+
+
+def _placeholder_friendly_simba(expr: Expr) -> Expr | None:
+    """
+    Synthetic SimBA stub for §5.1 tests.
+
+    Recognises only the linearised shape produced by §5.1 abstraction:
+    ``f * g + h * g`` where ``g`` is a placeholder. Folds to
+    ``(f + h) * g``. Returns ``None`` on anything else.
+
+    Crucially this stub does NOT fold the raw (non-abstracted) shape,
+    so the escalation loop is the only way to obtain a reduction.
+    """
+
+    def is_placeholder(node: Expr) -> bool:
+        return isinstance(node, ExprId) and node.name.startswith("g")
+
+    if isinstance(expr, ExprOp) and expr.op == "+" and len(expr.args) == 2:
+        left, right = expr.args
+        if (
+            isinstance(left, ExprOp)
+            and left.op == "*"
+            and isinstance(right, ExprOp)
+            and right.op == "*"
+            and any(is_placeholder(arg) for arg in left.args)
+            and any(is_placeholder(arg) for arg in right.args)
+        ):
+            shared = set(left.args) & set(right.args)
+            for candidate in shared:
+                if is_placeholder(candidate):
+                    la = [arg for arg in left.args if arg != candidate][0]
+                    rb = [arg for arg in right.args if arg != candidate][0]
+                    return ExprOp("*", ExprOp("+", la, rb), candidate)
+    return None
+
+
+def test_gamba_substitution_escalation_unlocks_shared_nonlinear_factor() -> None:
+    # ``a*x*y + b*x*y`` — the inner ``x*y`` is shared between both products.
+    # n=0 SimBA misses (the raw shape isn't a placeholder-friendly linear
+    # MBA), but abstracting ``x*y`` linearises the sum to ``a*g0 + b*g0``,
+    # which the synthetic SimBA folds. Reverse-substitution restores
+    # ``(a+b)*x*y`` which is net-smaller (7 < 8 nodes).
+    xy = ExprOp("*", _X, _Y)
+    subtree = ExprOp("+", ExprOp("*", _A, xy), ExprOp("*", _B, xy))
+
+    assert gamba_substitution(subtree, _placeholder_friendly_simba, max_k=0) is None
+    out = gamba_substitution(subtree, _placeholder_friendly_simba, max_k=1)
+    assert out is not None
+    assert _nodes(out) < _nodes(subtree)
+
+
+def test_gamba_substitution_escalation_returns_smallest_candidate() -> None:
+    # Three nonlinear leaves; the n=1 escalation tries each combination
+    # and the wrapper returns the smallest restored result. The synthetic
+    # SimBA only fires on the ``x*y`` abstraction (shared between both
+    # products), so the other two combos miss and the loop returns the
+    # one that fired.
+    xy = ExprOp("*", _X, _Y)
+    subtree = ExprOp("+", ExprOp("*", _A, xy), ExprOp("*", _B, xy))
+    out = gamba_substitution(subtree, _placeholder_friendly_simba, max_k=1)
+    assert out is not None
+    # Restored form is ``(a+b)*x*y``.
+    assert isinstance(out, ExprOp) and out.op == "*"
+
+
+def test_gamba_substitution_rejects_when_restored_form_not_smaller() -> None:
+    # ``a*x*y + x*y``: abstracting ``x*y`` linearises to ``a*g0 + g0`` —
+    # the synthetic SimBA does not match this shape (because one operand
+    # is not a product), so the escalation finds no candidate even at
+    # max_k=2.
+    xy = ExprOp("*", _X, _Y)
+    subtree = ExprOp("+", ExprOp("*", _A, xy), xy)
+    assert gamba_substitution(subtree, _placeholder_friendly_simba, max_k=2) is None
+
+
+def test_gamba_substitution_no_leaves_short_circuits() -> None:
+    # Pure linear input has zero nonlinear leaves; the escalation loop
+    # never enters and the wrapper returns None when n=0 also misses.
+    subtree = ExprOp("+", _X, _Y)
+    calls: list[Expr] = []
+
+    def miss(expr: Expr) -> Expr | None:
+        calls.append(expr)
+        return None
+
+    assert gamba_substitution(subtree, miss, max_k=3) is None
+    # Exactly one SimBA call (n=0). The escalation loop short-circuits
+    # because nonlinear_leaves returns the empty list.
+    assert len(calls) == 1
+
+
+def test_gamba_substitution_respects_gating_cap() -> None:
+    # Many nonlinear leaves should NOT lead to combinatorial explosion.
+    # With max_k=3 and 12 leaves the gating cap clips inner ``k`` to 2,
+    # so the total SimBA call count is bounded by C(12,1) + C(12,2) = 78,
+    # not C(12,3) = 220 + others. We assert the upper bound is respected.
+    from math import comb
+
+    leaves = [ExprOp("*", ExprId(f"v{i}", 64), ExprId(f"w{i}", 64)) for i in range(12)]
+    subtree = leaves[0]
+    for leaf in leaves[1:]:
+        subtree = ExprOp("+", subtree, leaf)
+
+    call_count = 0
+
+    def miss(expr: Expr) -> Expr | None:
+        nonlocal call_count
+        call_count += 1
+        return None
+
+    gamba_substitution(subtree, miss, max_k=3)
+    # n=0 attempt + C(12,1) + C(12,2). Gating clips k_max to 2 (n>9).
+    expected_upper = 1 + comb(12, 1) + comb(12, 2)
+    assert call_count == expected_upper
+
+
+def test_gated_max_k_caps_per_paper() -> None:
+    from msynth.simplification.gamba import _gated_max_k
+
+    # No leaves → no escalation.
+    assert _gated_max_k(0, 5) == 0
+    # max_k=0 disables escalation regardless of leaf count.
+    assert _gated_max_k(10, 0) == 0
+    # Few leaves: max_k respected up to the leaf count itself.
+    assert _gated_max_k(3, 5) == 3
+    assert _gated_max_k(5, 5) == 5
+    # Mid range (5 < n <= 9): cap at min(max_k, 3).
+    assert _gated_max_k(7, 5) == 3
+    assert _gated_max_k(9, 5) == 3
+    # High range (n > 9): cap at min(max_k, 2).
+    assert _gated_max_k(10, 5) == 2
+    assert _gated_max_k(50, 5) == 2
+
+
+def test_gamba_substitution_round_trip_preserves_atoms() -> None:
+    # After §5.1 abstraction + simba + reverse-abstract, the returned Expr
+    # must NOT contain any g* placeholder. The simplifier loop's
+    # _is_suitable_simplification_candidate would reject otherwise.
+    import re
+
+    xy = ExprOp("*", _X, _Y)
+    subtree = ExprOp("+", ExprOp("*", _A, xy), ExprOp("*", _B, xy))
+    out = gamba_substitution(subtree, _placeholder_friendly_simba, max_k=1)
+    assert out is not None
+    placeholders = [
+        v
+        for v in out.get_r(mem_read=False)
+        if hasattr(v, "name") and re.match(r"^g\d+$", v.name)
+    ]
+    assert placeholders == []

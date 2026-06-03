@@ -70,10 +70,14 @@ def test_simba_pipeline_runs_simba_then_ast() -> None:
 def test_gamba_pipeline_has_pre_then_simba_then_post_then_ast() -> None:
     p = gamba_pipeline()
     classes = [type(s).__name__ for s in p.passes]
+    # ExpandPass + FactorizeSumsPass appended between post-rewriter and
+    # AstNormalize; see pipeline.gamba_pipeline docstring.
     assert classes == [
         "GambaPreprocessingPass",
         "SimbaPass",
         "GambaPostRewriterPass",
+        "ExpandPass",
+        "FactorizeSumsPass",
         "AstNormalizationPass",
     ]
 
@@ -244,10 +248,14 @@ def test_simba_mode_pipeline_shape_via_simplifier() -> None:
 
 def test_gamba_mode_pipeline_shape_via_simplifier() -> None:
     sim = Simplifier(pipeline_mode=PipelineMode.GAMBA)
+    # ExpandPass + FactorizeSumsPass appended between post-rewriter and
+    # AstNormalize as part of GAMBA-general integration.
     assert [type(s).__name__ for s in sim.pipeline.passes] == [
         "GambaPreprocessingPass",
         "SimbaPass",
         "GambaPostRewriterPass",
+        "ExpandPass",
+        "FactorizeSumsPass",
         "AstNormalizationPass",
     ]
 

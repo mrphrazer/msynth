@@ -77,10 +77,15 @@ def test_simba_pipeline_factory_shape() -> None:
 
 def test_gamba_pipeline_factory_shape() -> None:
     pipeline = gamba_pipeline()
+    # ExpandPass and FactorizeSumsPass were added between the post-rewriter
+    # and AST normalisation as part of the GAMBA-general integration; see
+    # the docstring on :func:`pipeline.gamba_pipeline` for the rationale.
     assert [type(p).__name__ for p in pipeline.passes] == [
         "GambaPreprocessingPass",
         "SimbaPass",
         "GambaPostRewriterPass",
+        "ExpandPass",
+        "FactorizeSumsPass",
         "AstNormalizationPass",
     ]
 
@@ -115,6 +120,10 @@ def test_simplifier_default_pipeline_is_ast_norm_only() -> None:
                 "GambaPreprocessingPass",
                 "SimbaPass",
                 "GambaPostRewriterPass",
+                # ExpandPass + FactorizeSumsPass added for GAMBA-general
+                # nonlinear MBA work; see gamba.py for implementations.
+                "ExpandPass",
+                "FactorizeSumsPass",
                 "AstNormalizationPass",
             ],
         ),

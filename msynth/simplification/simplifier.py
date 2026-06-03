@@ -23,7 +23,11 @@ from msynth.utils.expr_utils import (
     get_unique_variables,
     is_strictly_smaller_tree,
 )
-from msynth.simplification.gamba import GAMBA_POST_REWRITER, GAMBA_PREPROCESSOR
+from msynth.simplification.gamba import (
+    GAMBA_POST_REWRITER,
+    GAMBA_PREPROCESSOR,
+    gamba_substitution,
+)
 from msynth.simplification.rewrites import DEFAULT_REWRITER
 from msynth.utils.sampling import has_adversarial_counterexample
 from msynth.utils.unification import gen_unification_dict, reverse_unification
@@ -144,6 +148,7 @@ class Simplifier:
         solver_timeout: int = 1,
         subtree_simba_max_vars: int = 5,
         subtree_simba_max_nodes: int = 30,
+        gamba_substitution_max_k: int = 3,
         enable_cegis: bool = False,
         cegis_max_templates: int = 50,
         cegis_timeout: int = 2,
@@ -184,6 +189,14 @@ class Simplifier:
                 dict has more than this many terminals.
             subtree_simba_max_nodes: Skip subtree SiMBA when the Miasm
                 graph of the subtree has more than this many nodes.
+            gamba_substitution_max_k: Maximum ``k`` for the §5.1
+                substitution escalation inside :func:`gamba_substitution`.
+                ``0`` disables escalation (equivalent to plain subtree-
+                SimBA). ``>= 1`` enables abstraction of up to ``k``
+                nonlinear leaves per attempt; combinatorial gating in
+                :func:`_gated_max_k` clips the effective bound based on
+                the leaf count of each subtree. Default ``3`` matches
+                upstream GAMBA's ``simplify_general`` cap.
             enable_cegis: Enable CEGIS constant synthesis as a last-resort
                 fallback on oracle + subtree-SiMBA miss. **Off by default**
                 — the CEGIS path runs Z3 against up to
@@ -241,6 +254,7 @@ class Simplifier:
         )
         self._subtree_simba_max_vars = subtree_simba_max_vars
         self._subtree_simba_max_nodes = subtree_simba_max_nodes
+        self._gamba_substitution_max_k = gamba_substitution_max_k
         # CEGIS solver — built lazily, only when enable_cegis=True, so the
         # off-path costs nothing besides one None check per fallback hop.
         self._cegis_solver: Optional[CegisSolver] = None
@@ -469,16 +483,36 @@ class Simplifier:
         # and re-collapses its conjunction-basis output. Under SIMBA mode
         # the global pipeline doesn't wrap, so the subtree-level call
         # doesn't either; subtree-SimBA gets the raw subtree.
+        #
+        # The actual SimBA invocation is routed through
+        # :func:`gamba_substitution` (§5.1 wrapper). At ``max_k=0`` the
+        # wrapper degenerates to "plain SimBA on subtree", subsuming the
+        # previous direct call exactly. ``max_k`` will become a tunable in
+        # follow-up work, escalating to the full §5.1 abstraction loop.
         if self._pipeline_mode == PipelineMode.GAMBA:
-            preprocessed = GAMBA_PREPROCESSOR.normalize(subtree)
-            simplified = self._subtree_simba_pass.run(preprocessed)
-            if simplified == preprocessed:
-                return None
-            simplified = GAMBA_POST_REWRITER.normalize(simplified)
+
+            def _simba_fn(arg: Expr) -> Optional[Expr]:
+                preprocessed = GAMBA_PREPROCESSOR.normalize(arg)
+                rewritten = self._subtree_simba_pass.run(preprocessed)
+                if rewritten == preprocessed:
+                    return None
+                return GAMBA_POST_REWRITER.normalize(rewritten)
         else:
-            simplified = self._subtree_simba_pass.run(subtree)
-            if simplified == subtree:
-                return None
+
+            def _simba_fn(arg: Expr) -> Optional[Expr]:
+                rewritten = self._subtree_simba_pass.run(arg)
+                if rewritten == arg:
+                    return None
+                return rewritten
+
+        # §5.1 escalation budget per subtree. Default ``3`` matches upstream
+        # GAMBA; callers can lower to ``0`` to recover the pre-escalation
+        # subtree-SimBA-only behaviour for measurement purposes.
+        simplified = gamba_substitution(
+            subtree, _simba_fn, max_k=self._gamba_substitution_max_k
+        )
+        if simplified is None:
+            return None
         # SimBA's reconstruction helpers (_sum, _or, _xor, _conjunction
         # in simba.py) emit variadic ExprOps. Re-binarise before
         # returning so the candidate respects the main loop's binary-

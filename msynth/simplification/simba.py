@@ -44,6 +44,61 @@ class _ExpressionKind(Enum):
 _PRIMARY_LEAVES = (ExprId, ExprMem, ExprSlice, ExprCompose, ExprCond)
 
 
+def _expr_node_count(expr: Expr) -> int:
+    """
+    Cheap structural size of an :class:`Expr`. Used as the net-shrink guard
+    for :func:`_bitwise_refine`, which only accepts a refined output when it
+    has strictly fewer nodes than the input.
+    """
+    try:
+        return len(expr.graph().nodes())
+    except Exception:
+        # ``Expr.graph()`` can fail on degenerate inputs (e.g. a bare leaf);
+        # fall back to a conservative size of 1 — the refine guard then
+        # rejects anything that isn't a strict improvement.
+        return 1
+
+
+def _bitwise_refine(expr: Expr) -> Expr:
+    """
+    Post-QM polish on a synthesised bitwise expression.
+
+    Reuses msynth's GAMBA §5.2 no-grow preprocessor (idempotence, De Morgan,
+    absorption, redundancy, complement-pair, XOR-collapses, …) to refine the
+    Quine-McCluskey output. Corresponds in spirit to upstream GAMBA's
+    ``BitwiseFactory.refine`` (XOR-insertion · negation-flipping · common-
+    factor extraction) — the unguarded §5.2 rules cover the negation-flip
+    and XOR-collapse cases. Common-factor extraction is intentionally NOT
+    invoked here: the guarded ``ring_normalize`` / ``factor_common_subterm``
+    rules in the post-rewriter widen the cube SimBA reconstructs over,
+    producing a refined form that fails the soundness check downstream
+    (see ``test_simba_4var_qm_produces_compact_form``). The preprocessor
+    is no-grow by construction, so the refined form cannot become larger
+    from rule application alone. The net-shrink guard below is belt-and-
+    braces against the rare case where bottom-up normalisation rebuilds
+    equal-size nodes differently.
+
+    Args:
+        expr: A bitwise Expr produced by ``_build_qm_bitwise`` (Quine-
+            McCluskey reconstruction) or any equivalent SimBA stage.
+
+    Returns:
+        The refined expression when it has strictly fewer nodes than
+        ``expr``; otherwise ``expr`` unchanged.
+    """
+    # Lazy import to avoid a top-of-module circular concern — ``simba`` is
+    # imported by ``pipeline``, and ``gamba`` is also imported by
+    # ``pipeline``; nothing in ``gamba`` depends on ``simba``, so the lazy
+    # import is purely defensive (the dependency graph is currently acyclic
+    # but a future change could break that quietly).
+    from msynth.simplification.gamba import GAMBA_PREPROCESSOR
+
+    refined = GAMBA_PREPROCESSOR.normalize(expr)
+    if _expr_node_count(refined) < _expr_node_count(expr):
+        return refined
+    return expr
+
+
 def _apply_op_rule(
     op: str, args: tuple, arg_kinds: list, parent_size: int
 ) -> _ExpressionKind | None:
@@ -857,6 +912,16 @@ class _SimbaSimplifier:
         qm_terms = _qm_minimise(table, len(variables))
         qm_expr = self._build_qm_bitwise(qm_terms, variables)
         if qm_expr is not None:
+            # NOTE: :func:`_bitwise_refine` is wired into the module but
+            # NOT called here — running the §5.2 preprocessor on per-region
+            # QM output triggers downstream SimBA-reconstruction tests in
+            # ``tests/simplification/test_simba_atoms.py`` (the affine-
+            # combination / division-atom / three-atom-mix Z3 checks). The
+            # rules are individually sound; the interaction with SimBA's
+            # multi-coefficient assembly is the open question. Follow-up:
+            # narrow refine to a hand-selected rule subset (XOR-collapse,
+            # De Morgan only) and re-test, or run refine after the full
+            # SimBA output assembly rather than per-region.
             return qm_expr
         # Final fallback: DNF (which may return None for row-0=1 cases)
         return self._dnf_expression(predicate, variables)
