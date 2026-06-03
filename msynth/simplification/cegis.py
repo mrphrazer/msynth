@@ -602,31 +602,63 @@ class CegisSolver:
 
     def _expand_templates(self, templates: List[Expr], size: int) -> List[Expr]:
         """
-        Expands templates with small wrappers to increase coverage.
+        Expands templates with light wrappers to add coverage.
+
+        Layout: every base template's bare form lands in the output first,
+        then wrappers are appended round-by-round (one round = "apply
+        wrapper W to every base"). This guarantees that even high-index
+        base templates such as ``(c0 * p0) + c1`` reach the iteration
+        pool before the budget runs out — the previous design exhausted
+        the budget on five wrappers of the first eight bases, leaving
+        every subsequent base unreachable.
+
+        Wrapper placeholders use the names ``c{N}`` for N starting at the
+        smallest unused index across the base template set. Base
+        templates use ``c0`` and ``c1``, so wrappers use ``c2``/``c3``;
+        Z3 then solves wrapper constants independently of the inner
+        template's constants instead of forcing them to share a value.
+        The previous design reused the names ``c0``/``c1`` which made
+        every expanded variant a *strict subset* of what the base
+        template already matched (the wrapper had to satisfy the same
+        Z3 variable as one of the inner placeholders).
+
+        ``expansion_budget`` is now the *additional* template count
+        beyond the base set. Setting it to 0 is equivalent to
+        ``expand_templates=False``.
 
         Args:
             templates: Base templates to expand.
             size: Bit-width for the expansion.
 
         Returns:
-            Expanded template list (bounded by expansion_budget).
+            Bases (verbatim) followed by up to ``expansion_budget``
+            wrapper variants.
         """
         if not templates or self.expansion_budget <= 0:
-            return templates
-        c0 = ExprId("c0", size)
-        c1 = ExprId("c1", size)
-        expanded: List[Expr] = []
-        for template in templates:
-            resized = self._resize_expr(template, size)
-            # Wrap the base template with light constant variants.
-            expanded.append(resized)
-            expanded.append(resized + c0)
-            expanded.append(resized ^ c0)
-            expanded.append((resized & c0) | c1)
-            expanded.append((resized + c0) ^ c1)
-            if len(expanded) >= self.expansion_budget:
-                break
-        return expanded[: self.expansion_budget]
+            return [self._resize_expr(t, size) for t in templates]
+
+        resized = [self._resize_expr(t, size) for t in templates]
+        # Fresh wrapper placeholders. ``c2``/``c3`` keep the ``c``
+        # prefix so :meth:`_placeholder_vars` discovers them via the
+        # existing ``^c[0-9]+$`` regex and Z3 solves them.
+        c2 = ExprId("c2", size)
+        c3 = ExprId("c3", size)
+        wrappers = [
+            lambda r: r + c2,
+            lambda r: r ^ c2,
+            lambda r: (r & c2) | c3,
+            lambda r: (r + c2) ^ c3,
+        ]
+
+        out: List[Expr] = list(resized)
+        added = 0
+        for wrap in wrappers:
+            for r in resized:
+                if added >= self.expansion_budget:
+                    return out
+                out.append(wrap(r))
+                added += 1
+        return out
 
     def _solve_template(
         self,

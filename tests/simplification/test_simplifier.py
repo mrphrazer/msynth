@@ -12,7 +12,14 @@ from msynth.simplification.simplifier import Simplifier
 
 
 def _write_min_oracle(tmp_path: Path) -> Path:
-    # create a minimal oracle instance without invoking multiprocessing-heavy init.
+    """
+    Pickle a degenerate :class:`SimplificationOracle` (empty ``oracle_map``,
+    one variable, three samples) for the few tests that exercise oracle
+    internals — ``determine_equivalence_class`` adding constant entries,
+    the demo-MBA reduction against ``_FULL_ORACLE``, etc. Tests that only
+    need the no-oracle fall-through path use ``Simplifier()`` directly
+    instead and skip this helper.
+    """
     oracle = SimplificationOracle.__new__(SimplificationOracle)
     oracle.num_variables = 1
     oracle.num_samples = 3
@@ -25,33 +32,12 @@ def _write_min_oracle(tmp_path: Path) -> Path:
     return path
 
 
-def _write_empty_oracle(
-    tmp_path: Path, num_variables: int = 3, num_samples: int = 8
-) -> Path:
-    # Empty oracle sized to hold equivalence-class queries with up to
-    # ``num_variables`` unified terminals. Used to exercise paths that
-    # must work without any pre-computed oracle entries.
-    oracle = SimplificationOracle.__new__(SimplificationOracle)
-    oracle.num_variables = num_variables
-    oracle.num_samples = num_samples
-    oracle.inputs = [
-        [(s * 17 + v * 3 + 1) & 0xFF for v in range(num_variables)]
-        for s in range(num_samples)
-    ]
-    oracle.oracle_map = {}
-
-    path = tmp_path / "empty_oracle.pkl"
-    with open(path, "wb") as f:
-        pickle.dump(oracle, f)
-    return path
-
-
 def _nodes(expr) -> int:
     return len(expr.graph().nodes())
 
 
-def test_skip_subtree_terminals(tmp_path: Path) -> None:
-    simplifier = Simplifier(_write_min_oracle(tmp_path))
+def test_skip_subtree_terminals() -> None:
+    simplifier = Simplifier()
 
     assert simplifier._skip_subtree(ExprId("p0", 8))
     assert simplifier._skip_subtree(ExprInt(1, 8))
@@ -60,6 +46,8 @@ def test_skip_subtree_terminals(tmp_path: Path) -> None:
 
 
 def test_determine_equivalence_class_adds_constant(tmp_path: Path) -> None:
+    # Needs a loaded oracle: ``determine_equivalence_class`` writes the
+    # constant equiv-class entry back into ``self.oracle.oracle_map``.
     simplifier = Simplifier(_write_min_oracle(tmp_path))
 
     p0 = ExprId("p0", 8)
@@ -70,8 +58,8 @@ def test_determine_equivalence_class_adds_constant(tmp_path: Path) -> None:
     assert simplifier.oracle.oracle_map[equiv_class] == [ExprInt(0, 8)]
 
 
-def test_reverse_global_unification_iterative(tmp_path: Path) -> None:
-    simplifier = Simplifier(_write_min_oracle(tmp_path))
+def test_reverse_global_unification_iterative() -> None:
+    simplifier = Simplifier()
 
     g0 = simplifier._gen_global_variable_replacement(0, 8)
     g1 = simplifier._gen_global_variable_replacement(1, 8)
@@ -86,10 +74,8 @@ def test_reverse_global_unification_iterative(tmp_path: Path) -> None:
     assert rewritten == ExprOp("+", ExprOp("+", x, y), y)
 
 
-def test_is_suitable_simplification_candidate_rejects_placeholder(
-    tmp_path: Path,
-) -> None:
-    simplifier = Simplifier(_write_min_oracle(tmp_path))
+def test_is_suitable_simplification_candidate_rejects_placeholder() -> None:
+    simplifier = Simplifier()
 
     expr = ExprOp("+", ExprId("p0", 8), ExprInt(1, 8))
     simplified = ExprId("p0", 8)
@@ -97,10 +83,8 @@ def test_is_suitable_simplification_candidate_rejects_placeholder(
     assert not simplifier._is_suitable_simplification_candidate(expr, simplified)
 
 
-def test_is_suitable_simplification_candidate_rejects_expr_simp_equivalence(
-    tmp_path: Path,
-) -> None:
-    simplifier = Simplifier(_write_min_oracle(tmp_path))
+def test_is_suitable_simplification_candidate_rejects_expr_simp_equivalence() -> None:
+    simplifier = Simplifier()
 
     p0 = ExprId("p0", 8)
     expr = ExprOp("+", p0, ExprInt(0, 8))
@@ -108,10 +92,8 @@ def test_is_suitable_simplification_candidate_rejects_expr_simp_equivalence(
     assert not simplifier._is_suitable_simplification_candidate(expr, p0)
 
 
-def test_is_suitable_simplification_candidate_enforce_equivalence(
-    tmp_path: Path, monkeypatch
-) -> None:
-    simplifier = Simplifier(_write_min_oracle(tmp_path), enforce_equivalence=True)
+def test_is_suitable_simplification_candidate_enforce_equivalence(monkeypatch) -> None:
+    simplifier = Simplifier(enforce_equivalence=True)
 
     expr = ExprOp("+", ExprId("p0", 8), ExprInt(1, 8))
     simplified = ExprOp("^", ExprId("p0", 8), ExprInt(1, 8))
@@ -124,9 +106,9 @@ def test_is_suitable_simplification_candidate_enforce_equivalence(
 
 
 def test_is_suitable_simplification_candidate_accepts_unknown_without_enforce(
-    tmp_path: Path, monkeypatch
+    monkeypatch,
 ) -> None:
-    simplifier = Simplifier(_write_min_oracle(tmp_path), enforce_equivalence=False)
+    simplifier = Simplifier(enforce_equivalence=False)
 
     x = ExprId("x", 8)
     y = ExprId("y", 8)
@@ -141,9 +123,9 @@ def test_is_suitable_simplification_candidate_accepts_unknown_without_enforce(
 
 
 def test_is_suitable_simplification_candidate_rejects_larger_candidate(
-    tmp_path: Path, monkeypatch
+    monkeypatch,
 ) -> None:
-    simplifier = Simplifier(_write_min_oracle(tmp_path), enforce_equivalence=False)
+    simplifier = Simplifier(enforce_equivalence=False)
 
     x = ExprId("x", 8)
     expr = ExprOp("^", x, ExprOp("^", x, ExprOp("-", x)))
@@ -160,10 +142,10 @@ def test_is_suitable_simplification_candidate_rejects_larger_candidate(
     assert not simplifier._is_suitable_simplification_candidate(expr, simplified)
 
 
-def test_is_suitable_simplification_candidate_accepts_smaller_normalized_equivalent(
-    tmp_path: Path,
-) -> None:
-    simplifier = Simplifier(_write_min_oracle(tmp_path), enforce_equivalence=True)
+def test_is_suitable_simplification_candidate_accepts_smaller_normalized_equivalent() -> (
+    None
+):
+    simplifier = Simplifier(enforce_equivalence=True)
 
     x = ExprId("x", 64)
     y = ExprId("y", 64)
@@ -183,9 +165,9 @@ def test_is_suitable_simplification_candidate_accepts_smaller_normalized_equival
 
 
 def test_is_suitable_simplification_candidate_rejects_unknown_counterexample(
-    tmp_path: Path, monkeypatch
+    monkeypatch,
 ) -> None:
-    simplifier = Simplifier(_write_min_oracle(tmp_path), enforce_equivalence=False)
+    simplifier = Simplifier(enforce_equivalence=False)
 
     x = ExprId("x", 8)
     y = ExprId("y", 8)
@@ -199,10 +181,8 @@ def test_is_suitable_simplification_candidate_rejects_unknown_counterexample(
     assert not simplifier._is_suitable_simplification_candidate(expr, simplified)
 
 
-def test_is_suitable_simplification_candidate_rejects_sat(
-    tmp_path: Path, monkeypatch
-) -> None:
-    simplifier = Simplifier(_write_min_oracle(tmp_path))
+def test_is_suitable_simplification_candidate_rejects_sat(monkeypatch) -> None:
+    simplifier = Simplifier()
 
     expr = ExprOp("+", ExprId("p0", 8), ExprInt(1, 8))
     simplified = ExprOp("^", ExprId("p0", 8), ExprInt(1, 8))
@@ -214,7 +194,7 @@ def test_is_suitable_simplification_candidate_rejects_sat(
     assert not simplifier._is_suitable_simplification_candidate(expr, simplified)
 
 
-def test_subtree_simba_fallback_simplifies_on_empty_oracle(tmp_path: Path) -> None:
+def test_subtree_simba_fallback_simplifies_on_empty_oracle() -> None:
     # With an empty oracle, no pre-computed equivalence class can ever match.
     # An inner linear MBA wrapped in a non-constant right shift cannot be
     # simplified by the global SimbaPass either (the root op is outside the
@@ -227,7 +207,7 @@ def test_subtree_simba_fallback_simplifies_on_empty_oracle(tmp_path: Path) -> No
     inner = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
     expr = ExprOp(">>", inner, shift)
 
-    simplifier = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=True)
+    simplifier = Simplifier(enable_subtree_simba=True)
     simplified = simplifier.simplify(expr)
 
     # Inner (x & y) + (x | y) collapses to (x + y); outer >> shift remains.
@@ -236,9 +216,7 @@ def test_subtree_simba_fallback_simplifies_on_empty_oracle(tmp_path: Path) -> No
     assert _nodes(simplified) < _nodes(expr)
 
 
-def test_subtree_simba_disabled_leaves_inner_linear_mba_untouched(
-    tmp_path: Path,
-) -> None:
+def test_subtree_simba_disabled_leaves_inner_linear_mba_untouched() -> None:
     # Counterproof for the previous test: with subtree-SiMBA disabled and an
     # empty oracle, no path can match the inner subtree, so the expression
     # must come back unchanged.
@@ -249,13 +227,13 @@ def test_subtree_simba_disabled_leaves_inner_linear_mba_untouched(
     inner = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
     expr = ExprOp(">>", inner, shift)
 
-    simplifier = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=False)
+    simplifier = Simplifier(enable_subtree_simba=False)
     simplified = simplifier.simplify(expr)
 
     assert simplified == expr
 
 
-def test_subtree_simba_respects_op_whitelist(tmp_path: Path) -> None:
+def test_subtree_simba_respects_op_whitelist() -> None:
     # The non-constant shift at the root is outside the operator whitelist,
     # so subtree-SiMBA must reject it regardless of size or variable count.
     # Combined with an empty oracle, this proves the whitelist is enforced:
@@ -265,13 +243,13 @@ def test_subtree_simba_respects_op_whitelist(tmp_path: Path) -> None:
     shift = ExprId("shift", size)
     expr = ExprOp(">>", x, shift)
 
-    simplifier = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=True)
+    simplifier = Simplifier(enable_subtree_simba=True)
     simplified = simplifier.simplify(expr)
 
     assert simplified == expr
 
 
-def test_subtree_simba_skips_placeholder_terminals(tmp_path: Path) -> None:
+def test_subtree_simba_skips_placeholder_terminals() -> None:
     # When the unification dict's keys are global_reg placeholders introduced
     # by an earlier BFS replacement, subtree-SiMBA must skip the subtree.
     #
@@ -286,7 +264,7 @@ def test_subtree_simba_skips_placeholder_terminals(tmp_path: Path) -> None:
     #
     # See ``test_simplifier_demo_mba_reaches_shortest_form_with_placeholder_guard``
     # for the end-to-end regression that motivates this guard.
-    simplifier = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=True)
+    simplifier = Simplifier(enable_subtree_simba=True)
 
     size = 64
     g0 = simplifier._gen_global_variable_replacement(0, size)
@@ -420,7 +398,7 @@ def test_simplifier_demo_mba_reaches_shortest_form_with_placeholder_guard() -> N
     )
 
 
-def test_subtree_simba_respects_node_limit(tmp_path: Path) -> None:
+def test_subtree_simba_respects_node_limit() -> None:
     # The inner linear MBA has 5 nodes; setting the node limit to 4 must
     # block subtree-SiMBA from firing, so the expression comes back
     # untouched even with subtree-SiMBA otherwise enabled.
@@ -432,7 +410,6 @@ def test_subtree_simba_respects_node_limit(tmp_path: Path) -> None:
     expr = ExprOp(">>", inner, shift)
 
     simplifier = Simplifier(
-        _write_empty_oracle(tmp_path),
         enable_subtree_simba=True,
         subtree_simba_max_nodes=4,
     )

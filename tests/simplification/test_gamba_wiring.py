@@ -22,9 +22,6 @@ verbose-conjunction-basis regression there.
 
 from __future__ import annotations
 
-import pickle
-from pathlib import Path
-
 import pytest
 from miasm.expression.expression import Expr, ExprId, ExprInt, ExprOp
 
@@ -32,7 +29,6 @@ from msynth.simplification.gamba import (
     GAMBA_POST_REWRITER,
     GAMBA_PREPROCESSOR,
 )
-from msynth.simplification.oracle import SimplificationOracle
 from msynth.simplification.pipeline import (
     default_pipeline,
     gamba_sandwich_pipeline,
@@ -49,18 +45,6 @@ def _nodes(expr: Expr) -> int:
 
 def _not_(x: Expr) -> Expr:
     return ExprOp("^", x, ExprInt(_MASK, _SIZE))
-
-
-def _write_empty_oracle(tmp_path: Path) -> Path:
-    oracle = SimplificationOracle.__new__(SimplificationOracle)
-    oracle.num_variables = 3
-    oracle.num_samples = 8
-    oracle.inputs = [[(s * 17 + v * 3 + 1) & 0xFF for v in range(3)] for s in range(8)]
-    oracle.oracle_map = {}
-    path = tmp_path / "empty_oracle.pkl"
-    with open(path, "wb") as f:
-        pickle.dump(oracle, f)
-    return path
 
 
 # ---------------------------------------------------------------------------
@@ -173,12 +157,12 @@ def test_gamba_post_runs_before_ast_normalisation() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_subtree_simba_wraps_call_with_pre_and_post(tmp_path: Path) -> None:
+def test_subtree_simba_wraps_call_with_pre_and_post() -> None:
     # The `_try_subtree_simba` method wraps its SimBA call with GAMBA
     # pre on input and GAMBA post on output (before binarisation).
     # We verify by reading the source for the sandwich, then by exercising
     # a shape where pre would shrink the input meaningfully.
-    sim = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=True)
+    sim = Simplifier(enable_subtree_simba=True)
     a, b = ExprId("a", _SIZE), ExprId("b", _SIZE)
     # `(a & b) + (a | b) + (a & a) + (b & b)` collapses to `2*a + 2*b`
     # only if GAMBA pre runs first (idempotence drops the duplicates).
@@ -195,8 +179,8 @@ def test_subtree_simba_wraps_call_with_pre_and_post(tmp_path: Path) -> None:
     assert _z3_equivalent(expr, out)
 
 
-def test_subtree_simba_pre_collapses_duplicate_idempotence(tmp_path: Path) -> None:
-    sim = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=True)
+def test_subtree_simba_pre_collapses_duplicate_idempotence() -> None:
+    sim = Simplifier(enable_subtree_simba=True)
     a = ExprId("a", _SIZE)
     # Forced via the sandwich: input goes through pre (drops dup), SimBA
     # may run, post runs, output is at most one atom.
@@ -210,7 +194,7 @@ def test_subtree_simba_pre_collapses_duplicate_idempotence(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_demo_mba_oracle_path_unchanged_with_subtree_wiring(tmp_path: Path) -> None:
+def test_demo_mba_oracle_path_unchanged_with_subtree_wiring() -> None:
     # The oracle path uses `default_pipeline()`, which intentionally
     # does NOT include the GAMBA pre/post sandwich. The subtree-SimBA
     # wiring fires inside the loop but is bounded by the strictly-smaller
@@ -218,7 +202,7 @@ def test_demo_mba_oracle_path_unchanged_with_subtree_wiring(tmp_path: Path) -> N
     # form. (The full version of this test is in test_simplifier.py and
     # uses the real oracle.pickle; here we just confirm the simplifier
     # constructs cleanly and the pipeline shape is as expected.)
-    sim = Simplifier(_write_empty_oracle(tmp_path), enable_subtree_simba=True)
+    sim = Simplifier(enable_subtree_simba=True)
     assert [type(s).__name__ for s in sim.pipeline.passes] == [
         "SimbaPass",
         "AstNormalizationPass",

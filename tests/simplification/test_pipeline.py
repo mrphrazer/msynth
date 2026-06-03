@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import pickle
 from dataclasses import dataclass
-from pathlib import Path
 
 from miasm.expression.expression import Expr, ExprId, ExprInt, ExprOp
 
-from msynth.simplification.oracle import SimplificationOracle
 from msynth.simplification.pipeline import (
     AstNormalizationPass,
     Pipeline,
@@ -14,19 +11,6 @@ from msynth.simplification.pipeline import (
 )
 from msynth.simplification.simba import SimbaPass
 from msynth.simplification.simplifier import Simplifier
-
-
-def _write_min_oracle(tmp_path: Path) -> Path:
-    oracle = SimplificationOracle.__new__(SimplificationOracle)
-    oracle.num_variables = 1
-    oracle.num_samples = 3
-    oracle.inputs = [[0], [1], [2]]
-    oracle.oracle_map = {}
-
-    path = tmp_path / "oracle.pkl"
-    with open(path, "wb") as handle:
-        pickle.dump(oracle, handle)
-    return path
 
 
 def test_ast_normalization_pass_splits_variadic_expression() -> None:
@@ -71,7 +55,7 @@ def test_default_pipeline_order() -> None:
     assert isinstance(pipeline.passes[-1], AstNormalizationPass)
 
 
-def test_simplifier_applies_optional_pipeline(tmp_path: Path) -> None:
+def test_simplifier_applies_optional_pipeline() -> None:
     @dataclass(frozen=True)
     class ConstantPass:
         name: str = "constant"
@@ -80,15 +64,13 @@ def test_simplifier_applies_optional_pipeline(tmp_path: Path) -> None:
             _ = expr
             return ExprInt(7, 8)
 
-    simplifier = Simplifier(
-        _write_min_oracle(tmp_path), pipeline=Pipeline([ConstantPass()])
-    )
+    simplifier = Simplifier(pipeline=Pipeline([ConstantPass()]))
 
     assert simplifier.simplify(ExprId("x", 8)) == ExprInt(7, 8)
 
 
-def test_simplifier_uses_default_pipeline_order(tmp_path: Path) -> None:
-    simplifier = Simplifier(_write_min_oracle(tmp_path))
+def test_simplifier_uses_default_pipeline_order() -> None:
+    simplifier = Simplifier()
 
     assert isinstance(simplifier.pipeline.passes[0], SimbaPass)
     assert isinstance(simplifier.pipeline.passes[-1], AstNormalizationPass)

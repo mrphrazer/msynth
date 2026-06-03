@@ -75,7 +75,7 @@ class Simplifier:
 
     def __init__(
         self,
-        oracle_path: Path,
+        oracle_path: Path | None = None,
         enforce_equivalence: bool = False,
         solver_timeout: int = 1,
         pipeline: Pipeline | None = None,
@@ -96,7 +96,13 @@ class Simplifier:
         Intializes an instance of Simplifier.
 
         Args:
-            oracle_path: File path to pre-computed simplification oracle.
+            oracle_path: Optional file path to a pre-computed simplification
+                oracle. If ``None``, the simplifier runs without the
+                oracle-lookup branch and relies on the pipeline + subtree
+                SiMBA + (optionally) CEGIS to produce simplifications.
+                Passing ``None`` is the right choice when you want a pure
+                SiMBA/CEGIS workflow with no precomputed equivalence-class
+                table — no need to pickle an empty placeholder.
             enforce_equivalence: Flag to enforce semantic equivalence checks before replacements.
             solver_timeout: SMT solver timeout in seconds.
             pipeline: Optional simplification pipeline applied before oracle simplification.
@@ -131,7 +137,11 @@ class Simplifier:
             cegis_expansion_budget: Cap on total expanded templates.
         """
         # public attributes
-        self.oracle = SimplificationOracle.load_from_file(oracle_path)
+        self.oracle = (
+            SimplificationOracle.load_from_file(oracle_path)
+            if oracle_path is not None
+            else None
+        )
         self.enforce_equivalence = enforce_equivalence
         self.solver_timeout = solver_timeout
         extra_passes = None if pipeline is None else pipeline.passes
@@ -544,8 +554,13 @@ class Simplifier:
                 # columns. Subtrees with more unified terminals overflow the
                 # compiled evaluator's index lookup (i[idx] raises IndexError).
                 # Skip the oracle path for those and fall through to subtree
-                # SiMBA / CEGIS, which do their own scaling checks.
-                if len(unification_dict) <= self.oracle.num_variables:
+                # SiMBA / CEGIS, which do their own scaling checks. Also
+                # skip the whole branch if the simplifier was constructed
+                # without an oracle (``oracle_path=None``).
+                if (
+                    self.oracle is not None
+                    and len(unification_dict) <= self.oracle.num_variables
+                ):
                     # determine subtree's equivalence class
                     equiv_class = self.determine_equivalence_class(
                         subtree.replace_expr(unification_dict)

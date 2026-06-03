@@ -43,13 +43,13 @@ def _semantically_equivalent(a, b, variables, *, seed: int, trials: int = 16) ->
     return True
 
 
-def test_cegis_off_by_default(write_empty_oracle) -> None:
+def test_cegis_off_by_default() -> None:
     """Regression test: no opt-in -> no CEGIS solver, no behavioural change."""
-    s = Simplifier(write_empty_oracle())
+    s = Simplifier()
     assert s._cegis_solver is None
 
 
-def test_cegis_recovers_constant_oracle_cannot(write_empty_oracle) -> None:
+def test_cegis_recovers_constant_oracle_cannot() -> None:
     """
     The empty oracle has no equivalence class for any subtree. The
     expression `v0 * 0x47 + 0x13` uses arbitrary constants no precomputed
@@ -62,13 +62,12 @@ def test_cegis_recovers_constant_oracle_cannot(write_empty_oracle) -> None:
     expr = v0 * ExprInt(0x47, size) + ExprInt(0x13, size)
 
     # Baseline: nothing happens without CEGIS on an empty oracle.
-    baseline = Simplifier(write_empty_oracle(num_variables=1), enable_cegis=False)
+    baseline = Simplifier(enable_cegis=False)
     out_off = baseline.simplify(expr)
     assert expr_simp(out_off) == expr_simp(expr)
 
     # CEGIS on: must produce a semantically equivalent expression.
     cegis = Simplifier(
-        write_empty_oracle(num_variables=1),
         enable_cegis=True,
         cegis_max_variables=1,
     )
@@ -76,7 +75,7 @@ def test_cegis_recovers_constant_oracle_cannot(write_empty_oracle) -> None:
     assert _semantically_equivalent(out_on, expr, [v0], seed=1)
 
 
-def test_cegis_solves_two_variable_template(write_empty_oracle) -> None:
+def test_cegis_solves_two_variable_template() -> None:
     """
     Two-variable template `(p0 & c0) | (p1 & c1)` is in the runtime
     template set. CEGIS should recover the masks 0x0F and 0xF0 from the
@@ -88,7 +87,6 @@ def test_cegis_solves_two_variable_template(write_empty_oracle) -> None:
     expr = (v0 & ExprInt(0x0F, size)) | (v1 & ExprInt(0xF0, size))
 
     s = Simplifier(
-        write_empty_oracle(num_variables=2),
         enable_cegis=True,
         cegis_max_variables=2,
     )
@@ -140,7 +138,7 @@ def test_cegis_refinement_recovers_constant() -> None:
     assert _semantically_equivalent(candidate, expr, [v0], seed=3)
 
 
-def test_cegis_skeleton_lookup_finds_shape_match(write_empty_oracle) -> None:
+def test_cegis_skeleton_lookup_finds_shape_match() -> None:
     """
     Skeleton bucketing pins the structural lookup: a target with the shape
     ``p0 * <int> + <int>`` should hit the runtime template set (which
@@ -157,7 +155,6 @@ def test_cegis_skeleton_lookup_finds_shape_match(write_empty_oracle) -> None:
     expr = v0 * ExprInt(0x47, size) + ExprInt(0x13, size)
 
     s = Simplifier(
-        write_empty_oracle(num_variables=1),
         enable_cegis=True,
         cegis_max_variables=1,
     )
@@ -194,7 +191,7 @@ def test_cegis_skeleton_lookup_finds_shape_match(write_empty_oracle) -> None:
     assert counters["z3"] <= 5  # generous; pre-Fix#2 was ~16
 
 
-def test_cegis_skips_when_too_many_variables(write_empty_oracle) -> None:
+def test_cegis_skips_when_too_many_variables() -> None:
     """
     With ``cegis_max_variables=3`` and a subtree using 4 distinct
     terminals, CEGIS must bail without attempting synthesis. Combined
@@ -208,7 +205,6 @@ def test_cegis_skips_when_too_many_variables(write_empty_oracle) -> None:
     expr = ExprOp("+", a, b, c, d, ExprInt(0x99, size))
 
     s = Simplifier(
-        write_empty_oracle(num_variables=4),
         enable_cegis=True,
         cegis_max_variables=3,
     )
@@ -216,7 +212,7 @@ def test_cegis_skips_when_too_many_variables(write_empty_oracle) -> None:
     assert expr_simp(out) == expr_simp(expr)
 
 
-def test_cegis_template_oracle_sized_to_max_variables(write_empty_oracle) -> None:
+def test_cegis_template_oracle_sized_to_max_variables() -> None:
     """
     The runtime template oracle's input matrix must have one column per
     variable the CEGIS solver might try to bind. The Simplifier sizes the
@@ -224,7 +220,6 @@ def test_cegis_template_oracle_sized_to_max_variables(write_empty_oracle) -> Non
     must widen the matrix accordingly.
     """
     s = Simplifier(
-        write_empty_oracle(num_variables=5),
         enable_cegis=True,
         cegis_max_variables=5,
     )
@@ -234,9 +229,7 @@ def test_cegis_template_oracle_sized_to_max_variables(write_empty_oracle) -> Non
         assert len(row) == 5
 
 
-def test_cegis_does_not_crash_when_max_variables_above_default(
-    write_empty_oracle,
-) -> None:
+def test_cegis_does_not_crash_when_max_variables_above_default() -> None:
     """
     Regression: raising ``cegis_max_variables`` above the historical
     hardcoded template-oracle width (3) used to crash with
@@ -260,7 +253,6 @@ def test_cegis_does_not_crash_when_max_variables_above_default(
     expr = ExprOp("+", a, b, c, d, e, ExprInt(0x77, size))
 
     s = Simplifier(
-        write_empty_oracle(num_variables=5),
         enable_cegis=True,
         cegis_max_variables=5,
     )
@@ -268,9 +260,7 @@ def test_cegis_does_not_crash_when_max_variables_above_default(
     assert _semantically_equivalent(out, expr, [a, b, c, d, e], seed=7)
 
 
-def test_cegis_template_oracle_width_matches_below_default(
-    write_empty_oracle,
-) -> None:
+def test_cegis_template_oracle_width_matches_below_default() -> None:
     """
     Symmetric to the regression test: lowering ``cegis_max_variables``
     below the historical hardcoded default (3) must also shrink the
@@ -279,7 +269,6 @@ def test_cegis_template_oracle_width_matches_below_default(
     each width is covered by the existing CEGIS tests.
     """
     s = Simplifier(
-        write_empty_oracle(num_variables=1),
         enable_cegis=True,
         cegis_max_variables=1,
     )
@@ -287,3 +276,244 @@ def test_cegis_template_oracle_width_matches_below_default(
     assert template_oracle.num_variables == 1
     for row in template_oracle.inputs:
         assert len(row) == 1
+
+
+# ---------------------------------------------------------------------------
+# Template-pool expansion behaviour
+#
+# The expansion step augments the base template set with wrapped
+# variants. To pay its keep it has to (a) leave every base template's
+# bare form in the pool so high-index base templates still get tried,
+# and (b) use placeholder names that don't collide with the inner
+# template's ``c0``/``c1`` — otherwise every wrapped variant is a
+# strict subset of what the base template already matched.
+# ---------------------------------------------------------------------------
+
+
+def _make_solver(*, expansion_budget: int, expand_templates: bool = True):
+    """Construct a CegisSolver whose only role is to expose ``_expand_templates``."""
+    oracle = TemplateOracle.gen_runtime_oracle(num_variables=1, template_budget=8)
+    return CegisSolver(
+        oracle,
+        max_templates=8,
+        solver_timeout=1,
+        max_variables=1,
+        refinement_iters=1,
+        validation_samples=4,
+        expand_templates=expand_templates,
+        expansion_budget=expansion_budget,
+    )
+
+
+def _placeholder_names(expr) -> set[str]:
+    """Variable names matching ``c[0-9]+`` anywhere in ``expr``."""
+    import re
+
+    from msynth.utils.expr_utils import get_unique_variables
+
+    return {
+        v.name
+        for v in get_unique_variables(expr)
+        if v.is_id() and re.match(r"^c[0-9]+$", v.name)
+    }
+
+
+def test_expand_templates_zero_budget_returns_only_resized_bases() -> None:
+    solver = _make_solver(expansion_budget=0)
+    p0 = ExprId("p0", 8)
+    c0 = ExprId("c0", 8)
+    bases = [ExprOp("+", p0, c0), ExprOp("^", p0, c0)]
+
+    expanded = solver._expand_templates(bases, 32)
+
+    # Every base resized to 32 bits, no wrapper appended.
+    assert len(expanded) == len(bases)
+    for b, e in zip(bases, expanded):
+        assert e.size == 32
+        assert e.op == b.op
+
+
+def test_expand_templates_bases_land_first() -> None:
+    solver = _make_solver(expansion_budget=8)
+    p0 = ExprId("p0", 8)
+    c0 = ExprId("c0", 8)
+    bases = [
+        ExprOp("+", p0, c0),
+        ExprOp("^", p0, c0),
+        ExprOp("*", c0, p0),
+        ExprOp("&", p0, c0),
+    ]
+
+    expanded = solver._expand_templates(bases, 32)
+
+    # The first len(bases) entries are the resized bases in order — no
+    # wrapper applied to any of them yet.
+    for i, base in enumerate(bases):
+        # Each base's resized form is a structural copy with size 32.
+        assert expanded[i].op == base.op
+        assert expanded[i].size == 32
+        # Bare base: no fresh c2/c3 placeholder yet.
+        assert "c2" not in _placeholder_names(expanded[i])
+        assert "c3" not in _placeholder_names(expanded[i])
+
+
+def test_expand_templates_wrappers_use_fresh_placeholders() -> None:
+    solver = _make_solver(expansion_budget=8)
+    p0 = ExprId("p0", 8)
+    c0 = ExprId("c0", 8)
+    bases = [ExprOp("+", p0, c0), ExprOp("^", p0, c0)]
+
+    expanded = solver._expand_templates(bases, 32)
+
+    # Drop the two bare bases; everything after is a wrapped template.
+    wrappers = expanded[len(bases) :]
+    assert wrappers, "expected wrappers in the expanded pool"
+    for w in wrappers:
+        names = _placeholder_names(w)
+        # Wrappers introduce c2 and possibly c3 in addition to the
+        # inner template's c0. The key invariant is that c2/c3 are NEW
+        # names (so Z3 solves them independently of c0/c1).
+        assert "c2" in names, f"wrapper {w} missing fresh c2 placeholder"
+        # The inner c0 stays present.
+        assert "c0" in names
+
+
+def test_expand_templates_round_robin_order() -> None:
+    """
+    Budget < total possible wrappers: the first round (``base + c2``)
+    applies to *every* base before any base gets a second wrapper.
+    Catches the old design where the budget was consumed wrapping the
+    first base five times in a row.
+    """
+    solver = _make_solver(expansion_budget=4)  # exactly one full round across 4 bases
+    p0 = ExprId("p0", 8)
+    c0 = ExprId("c0", 8)
+    bases = [
+        ExprOp("+", p0, c0),
+        ExprOp("^", p0, c0),
+        ExprOp("*", c0, p0),
+        ExprOp("&", p0, c0),
+    ]
+
+    expanded = solver._expand_templates(bases, 32)
+
+    # 4 bases + 4 wrappers (one ``+c2`` per base).
+    assert len(expanded) == 8
+    # Every wrapper in slots 4..7 should be of the form ``base[i] + c2``
+    # — same operator skeleton as the base, wrapped in an outer ``+``.
+    for i, base in enumerate(bases):
+        wrapped = expanded[4 + i]
+        assert wrapped.op == "+", f"wrapper #{i} should be ``+`` but is {wrapped.op}"
+        # Inner operand is the base; outer operand is c2.
+        inner, outer = wrapped.args
+        # Match by skeleton (op) rather than exact equality — the inner is
+        # the resized base.
+        assert inner.op == base.op, (
+            f"wrapper #{i} inner op {inner.op} doesn't match base {base.op}"
+        )
+        assert outer.is_id() and outer.name == "c2"
+
+
+def test_expand_templates_budget_caps_wrappers_not_bases() -> None:
+    """
+    Even a tiny ``expansion_budget`` must not drop any base template.
+    The old design would lose every base at index >= budget/5.
+    """
+    solver = _make_solver(expansion_budget=1)
+    p0 = ExprId("p0", 8)
+    c0 = ExprId("c0", 8)
+    bases = [
+        ExprOp("+", p0, c0),
+        ExprOp("^", p0, c0),
+        ExprOp("*", c0, p0),
+        ExprOp("&", p0, c0),
+        ExprOp("|", p0, c0),
+    ]
+
+    expanded = solver._expand_templates(bases, 32)
+
+    # All 5 bases + exactly 1 wrapper.
+    assert len(expanded) == len(bases) + 1
+    # Bases come first.
+    for i, base in enumerate(bases):
+        assert expanded[i].op == base.op
+
+
+def test_expand_templates_zero_budget_is_documented_off_switch() -> None:
+    """
+    ``expansion_budget=0`` is the documented equivalent of
+    ``expand_templates=False``: the wrapper loop is short-circuited and
+    only the resized bases come back. ``_expand_templates`` itself does
+    not read the boolean flag (that's checked one level up in
+    ``try_synthesize``), so this test exercises the same contract via
+    the budget knob.
+    """
+    solver_zero = _make_solver(expansion_budget=0)
+    p0 = ExprId("p0", 8)
+    c0 = ExprId("c0", 8)
+    bases = [ExprOp("+", p0, c0)]
+
+    expanded = solver_zero._expand_templates(bases, 32)
+
+    assert len(expanded) == 1
+    assert "c2" not in _placeholder_names(expanded[0])
+
+
+def test_cegis_default_expansion_solves_multiplicative_affine() -> None:
+    """
+    End-to-end coverage for the regression that motivated the redesign:
+    an MBA whose simplest equivalent is ``v0 * c + k`` (which fits the
+    base template ``(c0 * p0) + c1`` at runtime-template index 9) must
+    simplify with the *default* CEGIS settings. The pre-redesign
+    expansion consumed its budget on wrappers of the first eight base
+    templates, so index 9 never made it into the trial pool.
+    """
+    size = 32
+    v0 = ExprId("v0", size)
+    c = ExprInt(0xDEADBEEF, size)
+    k = ExprInt(0x1337, size)
+    prod = ExprOp("*", v0, c)
+    # ``(a | b) + (a & b) == a + b`` — obfuscated form of ``v0*c + k``.
+    obfuscated = (prod | k) + (prod & k)
+    expected_semantics = prod + k
+
+    simplifier = Simplifier(enable_cegis=True)
+    simplified = simplifier.simplify(obfuscated)
+
+    assert _semantically_equivalent(simplified, expected_semantics, [v0], seed=11)
+
+
+def test_cegis_expansion_solves_target_not_in_base_set() -> None:
+    """
+    ``(v0 & c) + k`` is not one of the runtime base templates (the base
+    set has ``(p0 & c0) | c1`` and ``(p0 & c0) ^ c1`` but not ``+``).
+    The wrapped variant ``(p0 & c0) + c2`` — added by ``_expand_templates``
+    on top of base ``p0 & c0`` — is the smallest template that matches.
+    The fresh ``c2`` is the load-bearing detail: had it shared the name
+    ``c0`` with the inner placeholder, Z3 would be forced to find a
+    single value satisfying both the mask and the offset, which only
+    works for the degenerate case ``mask == offset``.
+    """
+    size = 32
+    v0 = ExprId("v0", size)
+    mask = ExprInt(0xDEADBEEF, size)
+    offset = ExprInt(0x1337, size)
+
+    udict = gen_unification_dict((v0 & mask) + offset)
+    unified = ((v0 & mask) + offset).replace_expr(udict)
+
+    oracle = TemplateOracle.gen_runtime_oracle(num_variables=1, template_budget=80)
+    solver = CegisSolver(
+        oracle,
+        max_templates=80,
+        solver_timeout=2,
+        max_variables=1,
+        refinement_iters=2,
+        validation_samples=8,
+        expand_templates=True,
+        expansion_budget=40,
+    )
+
+    candidate = solver.try_synthesize((v0 & mask) + offset, unified, udict)
+    assert candidate is not None
+    assert _semantically_equivalent(candidate, (v0 & mask) + offset, [v0], seed=23)
