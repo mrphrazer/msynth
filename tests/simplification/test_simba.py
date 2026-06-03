@@ -244,9 +244,20 @@ def _xor_z3_equivalent(left: Expr, right: Expr) -> bool:
     z3_left = translator.from_expr(left)
     z3_right = translator.from_expr(right)
     solver = z3.Solver()
-    solver.set("timeout", 5000)
+    # Generous headroom: the hard 4-var multiply-by-constant corpus query
+    # solves in ~3s unloaded, but a 5s cap flaked under full-suite CPU
+    # contention. A genuine timeout must be a LOUD, distinct error — silently
+    # returning ``unknown == unsat`` (False) would misreport a correct rewrite
+    # as unsound.
+    solver.set("timeout", 30000)
     solver.add(z3_left != z3_right)
-    return solver.check() == z3.unsat
+    result = solver.check()
+    if result == z3.unknown:
+        raise AssertionError(
+            f"Z3 returned unknown within timeout for {left!r} vs {right!r}; "
+            "raise the timeout or move this case to scripts/run_simba_fuzzer.py."
+        )
+    return result == z3.unsat
 
 
 def test_simba_classifier_rejects_xor_of_mixed_with_mixed() -> None:

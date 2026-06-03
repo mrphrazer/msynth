@@ -42,30 +42,6 @@ def parse_expr(expr_str: str) -> Expr:
     return eval(expr_str, globals)
 
 
-def gen_unification_dict(expr: Expr) -> Dict[Expr, Expr]:
-    """
-    Generates a dictionary of unificiation variables.
-
-    For each unification candidate (terminal expressions such
-    as registers or memory), we generate placeholder variables
-    p<index> of the corresponding terminal expression size.
-
-    The resulting dictionary maps termial expressions to their
-    corresponding unification.
-
-    Args:
-        expr: Expression to generate unification variables for.
-
-    Returns:
-        Dictionary of expressions; terminals are mapped to unification variables.
-    """
-    return {
-        # {x: p0, y: p1, ...,}
-        unique_var: ExprId(f"p{index}", unique_var.size)
-        for index, unique_var in enumerate(get_unification_candidates(expr))
-    }
-
-
 def get_unique_variables(expr: Expr) -> List[Expr]:
     """
     Get all unique variables in an expression.

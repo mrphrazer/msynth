@@ -52,6 +52,7 @@ from miasm.expression.expression import (
 )
 
 from msynth.simplification.rewrites import DEFAULT_RULES, RewriteRule
+from msynth.utils.unification import abstract_terms, reverse_abstraction
 
 
 def _node_count(expr: Expr) -> int:
@@ -323,20 +324,21 @@ GAMBA_POST_REWRITER: GambaPostRewriter = GambaPostRewriter.from_default()
 
 
 # =============================================================================
-# GAMBA general nonlinear MBA (paper §5.1 substitution + Layer-1 passes)
+# GAMBA general nonlinear MBA — paper §5.1 substitution loop
 # =============================================================================
 #
-# Per user direction: everything related to GAMBA's general nonlinear pipeline
-# (the §5.1 substitution loop, the Expand pass, the FactorizeSums pass) lives
-# in this same gamba.py module rather than a separate gamba_general.py.
+# The §5.1 substitution loop lives here. (Distributive-expansion and
+# sum-factoring passes were prototyped here too but removed after a corpus
+# eval showed they net-regressed output size and duplicated the
+# ring_normalize / factor_common_subterm guarded rules already run by
+# GambaPostRewriterPass.)
 #
 # Layering recap:
-#   Layer 1 (this module): ExpandPass, FactorizeSumsPass — pipeline passes
-#     appended to gamba_pipeline() in pipeline.py.
-#   Layer 2 (this module): gamba_substitution() — invoked per-subtree from
+#   This module: gamba_substitution() — invoked per-subtree from
 #     simplifier.py's BFS loop. Replaces the plain subtree-SimBA tier.
-#   Layer 3 (simba.py): _bitwise_refine helper (wired but currently no-op —
-#     see comment in simba._lookup_bitwise_expression).
+#   simba.py: _bitwise_refine helper — applied to SimBA's fully-assembled
+#     output (net-positive in SIMBA mode; redundant with the post-rewriter
+#     in GAMBA mode).
 
 
 # ---------------------------------------------------------------------------
@@ -492,212 +494,6 @@ def nonlinear_leaves(expr: Expr) -> List[Expr]:
     return found
 
 
-# ---------------------------------------------------------------------------
-# Layer 1 — ExpandPass
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ExpandPass:
-    """
-    Distributive expansion pass (GAMBA paper §5.2 distribution step).
-
-    Applies ``a * (b + c) → a*b + a*c`` (and the symmetric `(b + c) * a`
-    shape) bottom-up with a net-shrink guard: the rewrite is committed only
-    when the distributed form has strictly fewer nodes than the input. This
-    avoids the obvious "expansion always grows the tree" trap — we only
-    distribute when downstream simplification will reduce the result enough
-    to pay for the expansion.
-
-    Designed to slot into :func:`pipeline.gamba_pipeline` after the
-    ``GambaPostRewriterPass`` so that any common-factor extraction the
-    post-rewriter has already done is not undone by indiscriminate
-    distribution.
-
-    Implementation note: the current pass is intentionally conservative —
-    it only distributes through one level. Multi-level distribution
-    (``a * (b * (c + d))``) is left for a follow-up pass that integrates
-    with :class:`FactorizeSumsPass` so that distribute/factor cycles can
-    converge via the BFS fixpoint instead of inside this pass.
-    """
-
-    max_iters: int = 50
-
-    def run(self, expr: Expr) -> Expr:
-        """Pipeline-pass entry point; matches the GambaPreprocessingPass shape."""
-        for _ in range(self.max_iters):
-            new_expr = _expand_once(expr)
-            if new_expr is expr or new_expr == expr:
-                return expr
-            expr = new_expr
-        return expr
-
-
-def _expand_once(expr: Expr) -> Expr:
-    """One bottom-up walk that distributes products over sums when net-shrink."""
-    if not isinstance(expr, ExprOp):
-        return expr
-    # Recurse first so leaves are expanded before parents (bottom-up).
-    new_args = tuple(_expand_once(arg) for arg in expr.args)
-    rebuilt = ExprOp(expr.op, *new_args) if new_args != tuple(expr.args) else expr
-    distributed = _try_distribute(rebuilt)
-    return distributed if distributed is not None else rebuilt
-
-
-def _try_distribute(expr: Expr) -> Expr | None:
-    """
-    Try the distributive rewrite at the root of ``expr``.
-
-    Returns the distributed Expr only when it has strictly fewer nodes
-    than ``expr``; otherwise ``None`` (caller keeps the original).
-    """
-    if not (isinstance(expr, ExprOp) and expr.op == "*" and len(expr.args) == 2):
-        return None
-    left, right = expr.args
-    sum_side: Expr | None = None
-    other: Expr | None = None
-    if isinstance(right, ExprOp) and right.op == "+":
-        sum_side, other = right, left
-    elif isinstance(left, ExprOp) and left.op == "+":
-        sum_side, other = left, right
-    if sum_side is None or other is None:
-        return None
-    # Distribute over each sum child.
-    distributed_terms = tuple(ExprOp("*", other, term) for term in sum_side.args)
-    candidate = ExprOp("+", *distributed_terms)
-    if _node_count(candidate) < _node_count(expr):
-        return candidate
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Layer 1 — FactorizeSumsPass
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class FactorizeSumsPass:
-    """
-    Global sum-factoring pass — local-pattern version of upstream GAMBA's
-    ``Node.factorize_sums`` (``utils/batch.Batch``).
-
-    Walks every ``+`` node and looks for a common factor shared by ≥ 2 of
-    its children; when found, extracts it as ``factor * (rest1 + rest2)``.
-    Accepts the rewrite only when net-shrink (the standard guard).
-
-    This is a *simplified* port: the upstream ``Batch`` partitioner tries
-    every multiset combination of factors across all sum children and
-    picks the one that maximises shared cardinality. The version below
-    extracts the FIRST commonly-shared factor it finds (cheap, less
-    optimal). The full multiset partitioner is a follow-up; the current
-    version covers the common ``c*x + c*y → c*(x+y)`` shape that recurs
-    in MBA outputs from SimBA reconstruction.
-    """
-
-    max_iters: int = 50
-
-    def run(self, expr: Expr) -> Expr:
-        """Pipeline-pass entry point."""
-        for _ in range(self.max_iters):
-            new_expr = _factorize_once(expr)
-            if new_expr is expr or new_expr == expr:
-                return expr
-            expr = new_expr
-        return expr
-
-
-def _product_factors(expr: Expr) -> List[Expr]:
-    """
-    Split a product into its multiplicand factors.
-
-    Returns ``[expr]`` for a non-product Expr — the convention is that
-    every Expr has at least itself as a factor for factoring purposes.
-    """
-    if isinstance(expr, ExprOp) and expr.op == "*":
-        return list(expr.args)
-    return [expr]
-
-
-def _factorize_once(expr: Expr) -> Expr:
-    """One bottom-up walk that factors common sub-terms out of sums when net-shrink."""
-    if not isinstance(expr, ExprOp):
-        return expr
-    new_args = tuple(_factorize_once(arg) for arg in expr.args)
-    rebuilt = ExprOp(expr.op, *new_args) if new_args != tuple(expr.args) else expr
-    factored = _try_factor_sum(rebuilt)
-    return factored if factored is not None else rebuilt
-
-
-def _try_factor_sum(expr: Expr) -> Expr | None:
-    """
-    Try to factor a common multiplicand shared by ≥ 2 of a ``+`` node's
-    children. This is a partial-overlap version of upstream GAMBA's
-    ``Node.factorize_sums`` — not the full multiset partitioner, but
-    enough to handle the recurring shapes
-    ``c*x + c*y + ...   → c*(x+y) + ...``
-    ``a*x + a*y + b*x + b*y → a*(x+y) + b*x + b*y → ... → (a+b)*(x+y)``
-    when the BFS fixpoint re-enters this pass.
-
-    Returns the factored Expr only when it has strictly fewer nodes than
-    ``expr``; otherwise ``None``.
-    """
-    if not (isinstance(expr, ExprOp) and expr.op == "+" and len(expr.args) >= 2):
-        return None
-
-    # Each term is a (possibly trivial) product; collect each term's factor list.
-    factor_lists: List[List[Expr]] = [_product_factors(term) for term in expr.args]
-
-    # Score every candidate factor by how many terms it appears in. We pick
-    # the highest-scoring factor (ties broken by first-seen) — that's the
-    # one whose extraction maximises the shared structure exposed.
-    candidate_counts: Dict[Expr, int] = {}
-    for factors in factor_lists:
-        seen_in_term: set[int] = set()
-        for factor in factors:
-            # Each distinct factor counts at most once per term.
-            if id(factor) in seen_in_term:
-                continue
-            seen_in_term.add(id(factor))
-            candidate_counts[factor] = candidate_counts.get(factor, 0) + 1
-
-    best_factor: Expr | None = None
-    best_count = 1  # at least 2 → a real shared factor
-    for factor, count in candidate_counts.items():
-        if count >= 2 and count > best_count:
-            best_factor = factor
-            best_count = count
-
-    if best_factor is None:
-        return None
-
-    matching_residues: List[Expr] = []
-    untouched: List[Expr] = []
-    for term, factors in zip(expr.args, factor_lists):
-        if best_factor not in factors:
-            untouched.append(term)
-            continue
-        remaining = list(factors)
-        remaining.remove(best_factor)  # remove first occurrence only
-        if not remaining:
-            matching_residues.append(ExprInt(1, expr.size))
-        elif len(remaining) == 1:
-            matching_residues.append(remaining[0])
-        else:
-            matching_residues.append(ExprOp("*", *remaining))
-
-    # Reassemble: factor * (residue1 + residue2 + ...) [+ untouched terms].
-    factored_part: Expr = (
-        ExprOp("*", best_factor, ExprOp("+", *matching_residues))
-        if len(matching_residues) > 1
-        else ExprOp("*", best_factor, matching_residues[0])
-    )
-    if untouched:
-        candidate_expr = ExprOp("+", factored_part, *untouched)
-    else:
-        candidate_expr = factored_part
-    if _node_count(candidate_expr) < _node_count(expr):
-        return candidate_expr
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -785,7 +581,7 @@ def gamba_substitution(
 
     # n >= 1: §5.1 abstraction loop. Each iteration:
     #   - pick ``k`` of the irreducibly-nonlinear leaves,
-    #   - substitute them with fresh placeholder vars (``abstract_subexprs``),
+    #   - substitute them with fresh placeholder vars (``abstract_terms``),
     #   - run SimBA on the now-linearised form,
     #   - reverse the substitution and accept only on net-shrink.
     if max_k < 1:
@@ -799,12 +595,12 @@ def gamba_substitution(
     best_nodes = original_nodes
     for k in range(1, gated_max + 1):
         for combo in combinations(leaves, k):
-            abstracted, mapping = abstract_subexprs(subtree, list(combo))
+            abstracted, mapping = abstract_terms(subtree, list(combo), prefix="g")
             attempt = simba_fn(abstracted)
             # SimBA miss → try next combination.
             if attempt is None or attempt == abstracted:
                 continue
-            restored = reverse_abstract(attempt, mapping)
+            restored = reverse_abstraction(attempt, mapping)
             restored_nodes = _node_count(restored)
             # Strict-shrink guard mirrors the BFS-loop suitability check
             # (whose node-count side is the cheap pre-filter). Equal-size
@@ -814,52 +610,3 @@ def gamba_substitution(
                 best = restored
                 best_nodes = restored_nodes
     return best
-
-
-def abstract_subexprs(
-    expr: Expr, targets: Sequence[Expr]
-) -> Tuple[Expr, Dict[Expr, Expr]]:
-    """
-    Replace each occurrence of every Expr in ``targets`` with a fresh
-    placeholder variable, returning the abstracted expression and the
-    placeholder → original mapping for reverse substitution.
-
-    Used by the §5.1 substitution loop (n ≥ 1) to abstract nonlinear
-    sub-expressions to fresh variables before re-running the linear SimBA
-    solver on the resulting linearised form.
-
-    Args:
-        expr: The expression containing nonlinear sub-expressions to abstract.
-        targets: The sub-expressions to abstract. Each gets a unique fresh
-            placeholder variable named ``g0``, ``g1``, … of matching size.
-
-    Returns:
-        A tuple ``(abstracted_expr, mapping)`` where ``abstracted_expr`` is
-        the input with every ``target`` replaced and ``mapping`` records
-        placeholder → original for use by :func:`reverse_abstract`.
-    """
-    mapping: Dict[Expr, Expr] = {}
-    replacements: Dict[Expr, Expr] = {}
-    for index, target in enumerate(targets):
-        placeholder = ExprId(f"g{index}", target.size)
-        mapping[placeholder] = target
-        replacements[target] = placeholder
-    abstracted = expr.replace_expr(replacements)
-    return abstracted, mapping
-
-
-def reverse_abstract(expr: Expr, mapping: Dict[Expr, Expr]) -> Expr:
-    """
-    Inverse of :func:`abstract_subexprs` — replace each placeholder var
-    with its original sub-expression.
-
-    Args:
-        expr: An abstracted Expr whose placeholder vars match keys in
-            ``mapping``.
-        mapping: Placeholder → original Expr mapping, as produced by
-            :func:`abstract_subexprs`.
-
-    Returns:
-        The expression with all placeholders restored to their originals.
-    """
-    return expr.replace_expr(mapping)

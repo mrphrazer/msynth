@@ -45,8 +45,6 @@ from msynth.simplification.ast import AbstractSyntaxTreeTranslator
 from msynth.simplification.gamba import (
     GAMBA_POST_REWRITER,
     GAMBA_PREPROCESSOR,
-    ExpandPass,
-    FactorizeSumsPass,
 )
 from msynth.simplification.simba import SimbaPass
 
@@ -319,17 +317,6 @@ def gamba_pipeline() -> Pipeline:
             GambaPreprocessingPass(),
             SimbaPass(),
             GambaPostRewriterPass(),
-            # NEW (GAMBA general): distributive expansion + global sum-factoring.
-            # Both are net-shrink-guarded; ExpandPass only commits when expansion
-            # exposes a downstream collapse, FactorizeSumsPass only when a common
-            # multiplicand is extractable into a strictly smaller form. They are
-            # appended AFTER the post-rewriter so that §5.2 algebraic refinement
-            # has already canonicalised the SimBA output before these passes try
-            # their broader transforms. See
-            # :class:`msynth.simplification.gamba.ExpandPass` and
-            # :class:`msynth.simplification.gamba.FactorizeSumsPass` for details.
-            ExpandPass(),
-            FactorizeSumsPass(),
             AstNormalizationPass(),
         ]
     )

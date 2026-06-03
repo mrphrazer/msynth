@@ -61,26 +61,34 @@ def _expr_node_count(expr: Expr) -> int:
 
 def _bitwise_refine(expr: Expr) -> Expr:
     """
-    Post-QM polish on a synthesised bitwise expression.
+    Algebraic polish on the fully-assembled SimBA reconstruction.
 
     Reuses msynth's GAMBA §5.2 no-grow preprocessor (idempotence, De Morgan,
     absorption, redundancy, complement-pair, XOR-collapses, …) to refine the
-    Quine-McCluskey output. Corresponds in spirit to upstream GAMBA's
+    final SimBA output. Corresponds in spirit to upstream GAMBA's
     ``BitwiseFactory.refine`` (XOR-insertion · negation-flipping · common-
-    factor extraction) — the unguarded §5.2 rules cover the negation-flip
-    and XOR-collapse cases. Common-factor extraction is intentionally NOT
-    invoked here: the guarded ``ring_normalize`` / ``factor_common_subterm``
-    rules in the post-rewriter widen the cube SimBA reconstructs over,
-    producing a refined form that fails the soundness check downstream
-    (see ``test_simba_4var_qm_produces_compact_form``). The preprocessor
-    is no-grow by construction, so the refined form cannot become larger
-    from rule application alone. The net-shrink guard below is belt-and-
-    braces against the rare case where bottom-up normalisation rebuilds
+    factor extraction) — the no-grow §5.2 rules cover the negation-flip and
+    XOR-collapse cases. Only ``GAMBA_PREPROCESSOR``'s ``guarded=False`` rules
+    run: the guarded ``ring_normalize`` / ``factor_common_subterm`` rules are
+    deliberately excluded so this stays a pure no-grow polish (those broader
+    rewrites are the post-rewriter's job in GAMBA mode).
+
+    Called once on the complete reconstruction at the end of
+    :meth:`_SimbaSimplifier.simplify` — NOT per Quine-McCluskey region. Applying
+    it per region perturbs SimBA's multi-coefficient assembly (the open issue
+    that previously kept it disabled); applying it once to the assembled output
+    operates on the whole coefficient-bearing expression and is sound. Each
+    constituent rule is individually Z3-verified in
+    ``tests/simplification/test_rewrites.py``, and the end-to-end soundness of
+    this call is gated by ``test_simba_bitwise_refine_is_sound`` /
+    ``test_simba_atoms``.
+
+    The preprocessor is no-grow by construction; the net-shrink guard below is
+    belt-and-braces against the rare case where bottom-up normalisation rebuilds
     equal-size nodes differently.
 
     Args:
-        expr: A bitwise Expr produced by ``_build_qm_bitwise`` (Quine-
-            McCluskey reconstruction) or any equivalent SimBA stage.
+        expr: The assembled SimBA reconstruction (any Expr).
 
     Returns:
         The refined expression when it has strictly fewer nodes than
@@ -528,7 +536,15 @@ class _SimbaSimplifier:
             # for one, two, or three variables can produce a more compact result.
             simplified = self._simplify_fewer_variables(simplified)
 
-        return simplified
+        # Polish the FULLY-ASSEMBLED reconstruction with the §5.2 no-grow
+        # algebraic rules (see :func:`_bitwise_refine`). Applied here — after
+        # all coefficient/bitwise terms are combined — rather than per QM region,
+        # so the rewrite operates on the complete coefficient-bearing expression
+        # and cannot perturb SimBA's multi-coefficient assembly. Net-shrink
+        # guarded, so it only ever makes the output smaller. This keeps SimBA's
+        # standalone output compact in SIMBA mode and in subtree-SimBA, where no
+        # GAMBA post-rewriter runs after the pass.
+        return _bitwise_refine(simplified)
 
     def _classify(self, expr: Expr) -> _ExpressionKind | None:
         """
@@ -912,16 +928,12 @@ class _SimbaSimplifier:
         qm_terms = _qm_minimise(table, len(variables))
         qm_expr = self._build_qm_bitwise(qm_terms, variables)
         if qm_expr is not None:
-            # NOTE: :func:`_bitwise_refine` is wired into the module but
-            # NOT called here — running the §5.2 preprocessor on per-region
-            # QM output triggers downstream SimBA-reconstruction tests in
-            # ``tests/simplification/test_simba_atoms.py`` (the affine-
-            # combination / division-atom / three-atom-mix Z3 checks). The
-            # rules are individually sound; the interaction with SimBA's
-            # multi-coefficient assembly is the open question. Follow-up:
-            # narrow refine to a hand-selected rule subset (XOR-collapse,
-            # De Morgan only) and re-test, or run refine after the full
-            # SimBA output assembly rather than per-region.
+            # Return the per-region QM bitwise expression unrefined: algebraic
+            # polishing is applied once to the fully-assembled reconstruction at
+            # the end of :meth:`simplify` (via :func:`_bitwise_refine`), not per
+            # region — running the §5.2 rules per region perturbs SimBA's
+            # multi-coefficient assembly, whereas refining the complete output
+            # is sound (see the comment at the ``simplify`` return site).
             return qm_expr
         # Final fallback: DNF (which may return None for row-0=1 cases)
         return self._dnf_expression(predicate, variables)

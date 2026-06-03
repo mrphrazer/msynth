@@ -50,6 +50,7 @@ from msynth.simplification.simba import (
     SimbaPass,
     _ExpressionKind,
     _SimbaSimplifier,
+    _bitwise_refine,
     _classify,
     _collect_atoms,
 )
@@ -540,7 +541,11 @@ def _z3_equivalent(left: Expr, right: Expr) -> bool:
     z3_left = translator.from_expr(left)
     z3_right = translator.from_expr(right)
     solver = z3.Solver()
-    solver.set("timeout", 5000)
+    # 30s headroom: these J-category multi-atom queries solve in a few seconds
+    # unloaded, but a 5s cap flaked under heavy/parallel suite load (Z3 returns
+    # unknown, which this helper treats as a hard failure). Generous headroom
+    # keeps a genuine timeout loud without spurious flakes.
+    solver.set("timeout", 30000)
     solver.add(z3_left != z3_right)
     result = solver.check()
     if result == z3.unknown:
@@ -606,6 +611,60 @@ def test_simba_z3_xor_allones_with_slice_in_and() -> None:
     b = ExprId("y", 8)
     expr = (a ^ ExprInt(0xFF, 8)) & b
     assert _z3_equivalent(expr, SimbaPass().run(expr))
+
+
+# ---------------------------------------------------------------------------
+# Soundness gate for the post-assembly _bitwise_refine polish
+# ---------------------------------------------------------------------------
+#
+# _bitwise_refine runs the GAMBA §5.2 no-grow rules once on the fully-assembled
+# SimBA reconstruction (end of _SimbaSimplifier.simplify). It was previously
+# disabled because applying it PER QM REGION perturbed the multi-coefficient
+# assembly; applied to the complete output it must be semantics-preserving.
+# These cases gate that, plus the affine / division-atom / three-atom-mix
+# shapes the disabled NOTE specifically warned about.
+
+
+def test_simba_bitwise_refine_is_sound() -> None:
+    x = ExprId("x", 8)
+    y = ExprId("y", 8)
+    z = ExprId("z", 8)
+    battery = [
+        ~(~x),                                  # double negation
+        (x & x) + y,                            # idempotence inside a sum
+        (x & y) | (x & (~y)),                   # complement pair -> x
+        x | (~x),                               # redundancy -> all-ones
+        (x ^ y) + ExprInt(2, 8) * (x & y),      # linear-MBA identity (== x + y)
+        ExprInt(5, 8) * ((x & y) + (x | y)) + ExprInt(3, 8),  # affine combination
+        x + y + z,                              # three-atom mix
+    ]
+    for expr in battery:
+        assert _z3_equivalent(expr, _bitwise_refine(expr)), expr
+
+
+def test_simba_bitwise_refine_actually_fires() -> None:
+    # Guard against the polish silently degenerating into a no-op: it must
+    # strictly shrink at least one representative input.
+    x = ExprId("x", 8)
+    expr = (x & x) + ~(~x)  # both summands collapse to x -> 2*x / x + x
+    out = _bitwise_refine(expr)
+    assert out != expr
+    assert _node_count(out) < _node_count(expr)
+    assert _z3_equivalent(expr, out)
+
+
+def test_simba_run_equivalent_after_refine_on_mba_identities() -> None:
+    # End-to-end: the refine step is inside SimbaPass.run; output stays
+    # equivalent on classic MBA identities.
+    x = ExprId("x", 16)
+    y = ExprId("y", 16)
+    battery = [
+        (x ^ y) + ExprInt(2, 16) * (x & y),     # == x + y
+        (x | y) + (x & y),                       # == x + y
+        (x | y) - (x & y),                       # == x ^ y
+    ]
+    for expr in battery:
+        assert _z3_equivalent(expr, SimbaPass().run(expr)), expr
 
 
 # ===========================================================================

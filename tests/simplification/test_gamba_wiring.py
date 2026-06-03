@@ -70,14 +70,10 @@ def test_simba_pipeline_runs_simba_then_ast() -> None:
 def test_gamba_pipeline_has_pre_then_simba_then_post_then_ast() -> None:
     p = gamba_pipeline()
     classes = [type(s).__name__ for s in p.passes]
-    # ExpandPass + FactorizeSumsPass appended between post-rewriter and
-    # AstNormalize; see pipeline.gamba_pipeline docstring.
     assert classes == [
         "GambaPreprocessingPass",
         "SimbaPass",
         "GambaPostRewriterPass",
-        "ExpandPass",
-        "FactorizeSumsPass",
         "AstNormalizationPass",
     ]
 
@@ -138,7 +134,7 @@ def test_gamba_post_cleans_simba_conjunction_basis_duplicates() -> None:
     expr = ExprOp("+", a, a, _not_(a))
     out = GAMBA_POST_REWRITER.normalize(expr)
     # Soundness check: same value as input for any `a`.
-    from tests.simplification.test_rewrites import _z3_equivalent
+    from test_rewrites import _z3_equivalent
 
     assert _z3_equivalent(expr, out)
     assert _nodes(out) <= _nodes(expr)
@@ -153,7 +149,7 @@ def test_gamba_post_runs_before_ast_normalisation() -> None:
     inner = ExprOp("+", ExprOp("&", a, b), ExprOp("|", a, b))
     p = gamba_pipeline()
     out = p.run(inner)
-    from tests.simplification.test_rewrites import _z3_equivalent
+    from test_rewrites import _z3_equivalent
 
     assert _z3_equivalent(inner, out)
 
@@ -179,7 +175,7 @@ def test_subtree_simba_wraps_with_gamba_under_gamba_mode() -> None:
         ExprOp("&", b, b),
     )
     out = sim.simplify(expr)
-    from tests.simplification.test_rewrites import _z3_equivalent
+    from test_rewrites import _z3_equivalent
 
     assert _z3_equivalent(expr, out)
 
@@ -205,7 +201,7 @@ def test_subtree_simba_fires_under_simba_mode_without_gamba_wrap() -> None:
     inner = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
     expr = ExprOp(">>", inner, shift)
     out = sim.simplify(expr)
-    from tests.simplification.test_rewrites import _z3_equivalent
+    from test_rewrites import _z3_equivalent
 
     assert _z3_equivalent(expr, out)
     # Subtree-SimBA found a strictly-smaller candidate (x + y vs the
@@ -248,14 +244,10 @@ def test_simba_mode_pipeline_shape_via_simplifier() -> None:
 
 def test_gamba_mode_pipeline_shape_via_simplifier() -> None:
     sim = Simplifier(pipeline_mode=PipelineMode.GAMBA)
-    # ExpandPass + FactorizeSumsPass appended between post-rewriter and
-    # AstNormalize as part of GAMBA-general integration.
     assert [type(s).__name__ for s in sim.pipeline.passes] == [
         "GambaPreprocessingPass",
         "SimbaPass",
         "GambaPostRewriterPass",
-        "ExpandPass",
-        "FactorizeSumsPass",
         "AstNormalizationPass",
     ]
 
@@ -279,7 +271,7 @@ def test_gamba_pipeline_converges_on_pathological_shapes() -> None:
     )
     out = GAMBA_PREPROCESSOR.normalize(expr)
     # Expect `a + c` (with 0 dropped).
-    from tests.simplification.test_rewrites import _z3_equivalent
+    from test_rewrites import _z3_equivalent
 
     assert _z3_equivalent(expr, out)
     assert _nodes(out) <= 4  # `+`, `a`, `c`, plus maybe one wrapper
@@ -336,6 +328,58 @@ def _build_zoo() -> list[Expr]:
 def test_gamba_pipeline_is_sound_on_zoo(expr: Expr) -> None:
     p = gamba_pipeline()
     out = p.run(expr)
-    from tests.simplification.test_rewrites import _z3_equivalent
+    from test_rewrites import _z3_equivalent
 
     assert _z3_equivalent(expr, out), f"unsound rewrite: {expr} -> {out}"
+
+
+# ---------------------------------------------------------------------------
+# §5.1 substitution loop — end-to-end through the real Simplifier + SimbaPass
+# ---------------------------------------------------------------------------
+#
+# The unit tests in test_gamba.py drive ``gamba_substitution`` with a synthetic
+# ``simba_fn`` stub. These exercise the escalation through the *real* pipeline:
+# ``Simplifier(pipeline_mode=GAMBA, gamba_substitution_max_k=k)`` builds the
+# real GAMBA-wrapped SimBA ``_simba_fn`` and routes subtree-SimBA through the
+# §5.1 abstraction loop.
+
+
+def test_gamba_substitution_escalation_end_to_end_unlocks_nonlinear_atom() -> None:
+    # ((x*y) ^ z) + 2*((x*y) & z) is the MBA identity for (x*y) + z. SimBA
+    # REJECTS the product-of-two-variables x*y (not a linear-MBA shape), so at
+    # max_k=0 the whole expression is a no-op and stays obfuscated. At max_k>=1
+    # the §5.1 loop abstracts x*y to a fresh atom, SimBA reduces the linearised
+    # form to g0 + z, and reverse-substitution restores (x*y) + z.
+    from test_rewrites import _z3_equivalent
+
+    x = ExprId("x", 8)
+    y = ExprId("y", 8)
+    z = ExprId("z", 8)
+    p = ExprOp("*", x, y)
+    expr = ExprOp("+", ExprOp("^", p, z), ExprOp("*", ExprInt(2, 8), ExprOp("&", p, z)))
+
+    out0 = Simplifier(pipeline_mode=PipelineMode.GAMBA, gamba_substitution_max_k=0).simplify(expr)
+    out2 = Simplifier(pipeline_mode=PipelineMode.GAMBA, gamba_substitution_max_k=2).simplify(expr)
+
+    # Both must stay sound.
+    assert _z3_equivalent(expr, out0)
+    assert _z3_equivalent(expr, out2)
+    # Escalation strictly helps: max_k=0 cannot reduce, max_k>=1 does.
+    assert out2 != out0
+    assert _nodes(out2) < _nodes(out0)
+    # The recovered form is the de-obfuscated (x*y) + z.
+    assert _z3_equivalent(out2, ExprOp("+", p, z))
+
+
+def test_gamba_substitution_escalation_end_to_end_is_sound_when_no_reduction() -> None:
+    # An expression with nonlinear leaves that the escalation cannot linearise
+    # must still come back semantically unchanged (the loop drives the real
+    # _simba_fn at every k and commits nothing).
+    from test_rewrites import _z3_equivalent
+
+    x = ExprId("x", 8)
+    y = ExprId("y", 8)
+    expr = ExprOp("+", ExprOp("*", x, y), x)  # a*x*y-style residue, no MBA collapse
+
+    out = Simplifier(pipeline_mode=PipelineMode.GAMBA, gamba_substitution_max_k=3).simplify(expr)
+    assert _z3_equivalent(expr, out)

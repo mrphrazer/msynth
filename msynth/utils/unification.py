@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Sequence, Tuple
 
 from miasm.expression.expression import Expr, ExprId
 from msynth.utils.expr_utils import get_unification_candidates
@@ -62,3 +62,61 @@ def reverse_unification(expr: Expr, unification_dict: Dict[Expr, Expr]) -> Expr:
         Expression with reversed unification.
     """
     return expr.replace_expr(invert_dict(unification_dict))
+
+
+def abstract_terms(
+    expr: Expr, targets: Sequence[Expr], prefix: str = "p"
+) -> Tuple[Expr, Dict[Expr, Expr]]:
+    """
+    Replace each occurrence of every Expr in ``targets`` with a fresh
+    placeholder variable, returning the abstracted expression and the
+    placeholder -> original mapping for reverse substitution.
+
+    This is the general placeholder-substitution primitive underlying
+    unification. :func:`gen_unification_dict` is the special case that
+    auto-discovers all terminals; here the caller supplies the exact set of
+    sub-expressions to abstract (e.g. GAMBA's nonlinear leaves) and chooses a
+    placeholder ``prefix`` so distinct abstraction passes do not collide
+    (``p`` for terminal unification, ``g`` for GAMBA subexpression abstraction).
+
+    Args:
+        expr: Expression containing the sub-expressions to abstract.
+        targets: Sub-expressions to abstract. Each gets a unique fresh
+            placeholder ``ExprId`` named ``{prefix}0``, ``{prefix}1``, ... of
+            matching size.
+        prefix: Placeholder name prefix.
+
+    Returns:
+        Tuple ``(abstracted_expr, mapping)`` where ``abstracted_expr`` is the
+        input with every ``target`` replaced and ``mapping`` records
+        placeholder -> original for use by :func:`reverse_abstraction`.
+    """
+    mapping: Dict[Expr, Expr] = {}
+    replacements: Dict[Expr, Expr] = {}
+    for index, target in enumerate(targets):
+        placeholder = ExprId(f"{prefix}{index}", target.size)
+        mapping[placeholder] = target
+        replacements[target] = placeholder
+    return expr.replace_expr(replacements), mapping
+
+
+def reverse_abstraction(expr: Expr, mapping: Dict[Expr, Expr]) -> Expr:
+    """
+    Inverse of :func:`abstract_terms` — replace each placeholder var with its
+    original sub-expression.
+
+    Unlike :func:`reverse_unification` (which takes the forward
+    original -> placeholder dict and inverts it), this takes the
+    placeholder -> original mapping produced by :func:`abstract_terms`
+    directly.
+
+    Args:
+        expr: An abstracted Expr whose placeholder vars match keys in
+            ``mapping``.
+        mapping: Placeholder -> original Expr mapping from
+            :func:`abstract_terms`.
+
+    Returns:
+        The expression with all placeholders restored to their originals.
+    """
+    return expr.replace_expr(mapping)
