@@ -87,13 +87,26 @@ def test_gen_adversarial_inputs_is_linear_in_variables() -> None:
     x = ExprId("x", 8)
     y = ExprId("y", 8)
 
-    inputs = sampling.gen_adversarial_inputs([x, y])
+    # Each variable contributes a fixed block (2 rows per adversarial value:
+    # one over an all-zero base, one over an all-one base), plus 2 shared base
+    # rows ([0,...] and [1,...]). So the row count grows *linearly* with the
+    # number of variables, which is the property this test must pin down.
+    per_var_rows = 2 * len(sampling.gen_adversarial_values(8))
+    one_var = sampling.gen_adversarial_inputs([x])
+    two_var = sampling.gen_adversarial_inputs([x, y])
 
-    assert [] not in inputs
-    assert [0, 0] in inputs
-    assert [1, 1] in inputs
-    assert [0xFF, 0] in inputs
-    assert [1, 0xFF] in inputs
+    assert len(one_var) == 2 + per_var_rows
+    assert len(two_var) == 2 + 2 * per_var_rows
+    # adding a variable adds exactly one per-variable block (linear, not
+    # exponential) -- the actual claim in the test name
+    assert (len(two_var) - 2) == 2 * (len(one_var) - 2)
+
+    # shape/membership spot-checks
+    assert [] not in two_var
+    assert [0, 0] in two_var
+    assert [1, 1] in two_var
+    assert [0xFF, 0] in two_var
+    assert [1, 0xFF] in two_var
 
 
 def test_has_adversarial_counterexample_catches_shift_collision() -> None:

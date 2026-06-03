@@ -14,8 +14,9 @@ Two MBAs are exercised:
    algebraically equal to ``v0 + v1 + 5``. SimBA's classifier
    recognises this as a linear combination of bitwise atoms.
 
-2. **Nested-bitwise absorption identity** — exercises GAMBA's
-   ``nested_bitwise_absorb`` rule family (``x | -((x & y) | -x) → x``).
+2. **Nested-bitwise absorption identity** — ``x | -((x & y) | -x) → x``.
+   Collapsed by the shared algebraic rewriter in every mode (not a
+   GAMBA-exclusive reduction); see ``gamba_friendly_mba`` for details.
 
 Both demos run against both modes side by side for an honest
 comparison. The corpus-level advantage of GAMBA over SIMBA (+1.6 to
@@ -69,15 +70,21 @@ def gamba_friendly_mba(size: int) -> Expr:
     Construct a nested-bitwise shape that exercises the GAMBA post-
     rewriter's algebraic identities.
 
-    ``x | -((x & y) | -x)`` is one of the Tier 3 GAMBA
-    ``nested_bitwise_absorb`` rules and simplifies to ``x``. SimBA on
-    its own cannot recognise the outer ``|`` over a negated nested
-    expression — it's outside the linear-MBA fragment. GAMBA's pre-
-    rewriter applies the algebraic identity directly.
+    ``x | -((x & y) | -x)`` matches one of the Tier 3 GAMBA
+    ``nested_bitwise_absorb`` identities and simplifies to ``x``. SimBA's
+    linear-MBA classifier on its own cannot recognise the outer ``|`` over
+    a negated nested expression — it's outside the linear fragment — so the
+    SimBA reconstruction stage leaves it alone.
 
-    Both SIMBA and GAMBA modes run on the same input here so the
-    comparison is honest. SIMBA mode leaves the input untouched (its
-    classifier can't accept this shape); GAMBA mode collapses it.
+    NOTE: the closing algebraic rewriter (``DEFAULT_REWRITER``, run at the
+    end of *every* ``Simplifier.simplify`` regardless of mode) already
+    collapses this shape, so in practice ALL pipeline modes (AST, SIMBA,
+    GAMBA) converge on ``x`` here. This example therefore demonstrates the
+    shared nested-bitwise absorption identity, not a GAMBA-exclusive
+    capability. GAMBA's distinct advantage is structural (running the
+    algebraic rules *before* SimBA and handling non-linear MBA via §5.1
+    substitution) and shows up at the corpus level, not on this single
+    tractable shape.
     """
     x = ExprId("x", size)
     y = ExprId("y", size)
@@ -106,10 +113,11 @@ def main() -> None:
     _run("SIMBA", PipelineMode.SIMBA, mba1)
     _run("GAMBA", PipelineMode.GAMBA, mba1)
 
-    # 2) Nested-bitwise absorption identity. SIMBA's classifier rejects
-    #    the shape (outer ``|`` over a negated nested expression); GAMBA
-    #    pre/post collapses it to ``x``.
-    logger.info("Demo 2: GAMBA-only nested-bitwise absorption")
+    # 2) Nested-bitwise absorption identity. The closing algebraic rewriter
+    #    runs in every mode, so AST/SIMBA/GAMBA all collapse this to ``x``;
+    #    the demo illustrates the shared absorption identity, not a
+    #    GAMBA-exclusive win.
+    logger.info("Demo 2: nested-bitwise absorption (collapses in all modes)")
     mba2 = gamba_friendly_mba(size)
     _run("SIMBA", PipelineMode.SIMBA, mba2)
     _run("GAMBA", PipelineMode.GAMBA, mba2)

@@ -42,7 +42,8 @@ def test_mutator_downcast_expression_adds_mask(monkeypatch) -> None:
     p1 = ExprId("p1", 8)
     grammar = Grammar(8, [p0, p1])
     mutator = Mutator(grammar)
-    mutator.sizes_casting = [0xFF]
+    # a mask strictly narrower than the 8-bit subexpression -> genuine downcast
+    mutator.sizes_casting = [0x0F]
     mutator.mutations.append(mutator.downcast_expression)
 
     t1 = ExprId("t1", 8)
@@ -54,7 +55,7 @@ def test_mutator_downcast_expression_adds_mask(monkeypatch) -> None:
     mutated = mutator.downcast_expression(state)
 
     assert mutated.expr_ast.is_op() and mutated.expr_ast.op == "&"
-    assert isinstance(mutated.expr_ast.args[1], ExprInt)
+    assert mutated.expr_ast.args[1] == ExprInt(0x0F, 8)
 
 
 def test_mutator_replace_subexpression_with_expression_size_mismatch(

@@ -173,7 +173,9 @@ def test_simba_returns_shift_unchanged() -> None:
     assert SimbaPass().run(expr) is expr
 
 
-def test_simba_returns_mixed_width_slice_unchanged() -> None:
+def test_simba_returns_slice_atom_unchanged() -> None:
+    # A bare slice is a single BITWISE atom (no width mismatch involved):
+    # it reconstructs to itself, so the pass is a no-op.
     x = ExprId("x", 8)
     expr = ExprSlice(x, 0, 4)
 
@@ -341,9 +343,11 @@ def test_simba_classifier_still_accepts_pure_constant_xor() -> None:
 
 
 def test_simba_simplifies_memory_paper_identity() -> None:
-    # The (a & b) + (a | b) == a + b identity carried by a single
-    # memory atom (b == a). Validates that ExprMem participates in the
-    # cube reconstruction, not just that it is named as an atom.
+    # Single-atom case: with b == a == mem, (mem & mem) + (mem | mem)
+    # degenerates to 2*mem. This validates that an ExprMem participates in
+    # the cube reconstruction at all (not the two-operand (a&b)+(a|b)==a+b
+    # identity -- that one needs two distinct atoms and is covered by
+    # test_simba_collapses_memory_andor_sum_to_linear_sum below).
     mem = ExprMem(ExprId("ptr", 8), 8)
     expr = (mem & mem) + (mem | mem)
 
@@ -372,7 +376,8 @@ def test_simba_collapses_memory_andor_sum_to_linear_sum() -> None:
 
     simplified = SimbaPass().run(expr)
     assert_equivalent_atoms(simplified, expr, [a, b])
-    assert node_count(simplified) <= node_count(expr)
+    # (a & b) + (a | b) -> a + b is a strict reduction (5 nodes -> 3)
+    assert node_count(simplified) < node_count(expr)
 
 
 def test_simba_handles_mixed_register_and_memory_mba() -> None:

@@ -115,8 +115,11 @@ def _apply_op_rule(
 
     Given an ExprOp's operator string, args, and the classified kinds
     of those args, return the kind of the whole op — or ``None`` if no
-    rule in the linear-MBA fragment matches (signalling that the op
-    should be treated as an opaque BITWISE atom by the caller).
+    rule in the linear-MBA fragment matches this operand-kind
+    combination. The caller (:func:`_classify_uncached`) treats a
+    ``None`` here as a whole-expression no-op signal (``(None, True)``),
+    NOT as an instruction to atomise the node — operand-kind rejections
+    are deliberately left unsimplified rather than turned into atoms.
     """
     mask = (1 << parent_size) - 1
 
@@ -214,10 +217,11 @@ def _classify(
     recursing into its structure).
 
     The atomisation extension (GAMBA Section 5.5) generalises the
-    Slice/Compose/Mem leaves to every node that the strict linear-MBA
-    classifier rejects: when no per-op rule in :func:`_apply_op_rule`
-    matches, the node is returned as a BITWISE atom. Soundness rests
-    on three properties that hold for every miasm pure-function node:
+    Slice/Compose/Mem leaves to every node whose *operator* is outside
+    the linear-MBA fragment (the fast path in
+    :func:`_classify_uncached`): such a node is returned as a BITWISE
+    atom. Soundness rests on three properties that hold for every miasm
+    pure-function node:
 
     1. Determinism per cube assignment — when the inner atoms take
        fixed integer values, the node takes a deterministic integer
@@ -227,8 +231,15 @@ def _classify(
     3. Width match — checked here via ``expr.size != parent_size``,
        so ``env[node]`` and the cube modulus align.
 
-    ``(None, True)`` is returned only when width fundamentally
-    mismatches — the no-op short-circuit signal used by callers.
+    Note the distinction from an *operand-kind* rejection: when the
+    operator IS in the fragment but its operand kinds don't match any
+    rule, the classifier does NOT atomise — it returns the no-op signal
+    ``(None, True)`` instead (see :func:`_classify_uncached`).
+
+    ``(None, True)`` (the no-op short-circuit signal used by callers) is
+    returned in three cases: a fundamental width mismatch, an operand-kind
+    rejection, and propagation of either from a child argument. It is NOT
+    limited to width mismatches.
     """
     if cache is None:
         cache = {}
@@ -323,7 +334,8 @@ def _collect_atoms(expr: Expr) -> list[Expr]:
     def walk(node: Expr) -> None:
         kind, is_atom = _classify(node, parent_size, cache)
         if kind is None:
-            # Width fundamentally doesn't fit; can't atomise either.
+            # No-op signal (width mismatch or operand-kind rejection):
+            # the node is outside the fragment and is not atomised.
             return
         if isinstance(node, ExprInt):
             return
@@ -509,11 +521,12 @@ class _SimbaSimplifier:
         if self.size <= 0:
             return self.expr
 
-        # Under the atomisation extension, the only thing that can
-        # produce a no-op signal is a fundamental width mismatch — the
-        # classifier always finds an atom for everything else (at worst,
-        # the whole expression becomes a single opaque BITWISE atom and
-        # SiMBA's reconstruction returns it unchanged).
+        # A None here is the classifier's no-op signal: either a width
+        # mismatch, or the top node is a linear-MBA operator whose operand
+        # kinds don't match any rule (operand-kind rejection). Operators
+        # outside the fragment instead atomise to a single opaque BITWISE
+        # atom, which SiMBA reconstructs unchanged. In every None case we
+        # leave the input alone.
         if self._classify(self.expr) is None:
             return self.expr
 
@@ -548,16 +561,17 @@ class _SimbaSimplifier:
 
     def _classify(self, expr: Expr) -> _ExpressionKind | None:
         """
-        Return the linear-MBA kind of ``expr`` or None if width
-        fundamentally doesn't fit the cube model.
+        Return the linear-MBA kind of ``expr`` or None (the no-op
+        signal) when ``expr`` is outside the cube model.
 
-        Under the atomisation extension, the only non-None failure
-        mode is a size mismatch with ``self.size``. Every other node
-        — including operators outside the linear-MBA fragment, like
-        shifts, rotations, division, multiplication of two non-arith
-        operands, and ExprCond — classifies as BITWISE because the
-        cube reasoning treats it as an opaque atom. See the module-
-        level :func:`_classify` for the soundness sketch.
+        Under the atomisation extension, None is returned for a size
+        mismatch with ``self.size`` OR for an operand-kind rejection (a
+        fragment operator whose operand kinds match no rule). Operators
+        outside the linear-MBA fragment — shifts, rotations, division,
+        multiplication of two non-arith operands, ExprCond — do NOT
+        return None: they classify as BITWISE because the cube reasoning
+        treats them as opaque atoms. See the module-level
+        :func:`_classify` for the soundness sketch.
         """
         kind, _ = _classify(expr, self.size, self._classify_cache)
         return kind
@@ -887,7 +901,11 @@ class _SimbaSimplifier:
 
         Upstream SiMBA ships lookup tables for up to three variables. To avoid a
         bundled table, this implementation recognizes the common compact forms
-        directly and falls back to a DNF expression for remaining predicates.
+        directly, then uses Quine-McCluskey minimisation for the rest. A DNF
+        fallback follows QM, but QM already covers every table except the
+        all-ones table (for which DNF also returns None), so the DNF minterm
+        construction is effectively unreachable in practice; it is kept as a
+        defensive last resort. Returns None when no bitwise form is produced.
         """
         table = self._table_to_int(predicate)
         variable_tables = [
@@ -935,7 +953,10 @@ class _SimbaSimplifier:
             # multi-coefficient assembly, whereas refining the complete output
             # is sound (see the comment at the ``simplify`` return site).
             return qm_expr
-        # Final fallback: DNF (which may return None for row-0=1 cases)
+        # Defensive last resort: DNF. In practice QM above succeeds for every
+        # table except the all-ones table, and for that table _dnf_expression
+        # also returns None (its row-0 minterm can't be built), so this call
+        # currently only ever returns None. Kept in case QM coverage changes.
         return self._dnf_expression(predicate, variables)
 
     def _dnf_expression(
@@ -944,9 +965,11 @@ class _SimbaSimplifier:
         """
         Build a disjunctive-normal-form predicate.
 
-        DNF is only a fallback for small truth tables. If the predicate includes
-        the all-zero row, building that minterm would require a constant true
-        expression; returning None lets the caller abandon that refinement.
+        DNF is only a defensive fallback (see :meth:`_lookup_bitwise_expression`:
+        Quine-McCluskey already covers every reachable table, so this is not
+        exercised in practice). If the predicate includes the all-zero row
+        (assignment 0 enabled), building that minterm would require a constant
+        true expression; returning None lets the caller abandon that refinement.
         """
         terms = []
         for assignment, enabled in enumerate(predicate):

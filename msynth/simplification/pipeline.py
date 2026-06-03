@@ -79,9 +79,10 @@ class GambaPreprocessingPass:
 
     Delegates to the self-contained, miasm-free
     :data:`~msynth.simplification.gamba.GAMBA_PREPROCESSOR`, which
-    applies all 53 ``guarded=False`` rules from
+    applies every ``guarded=False`` rule from
     :data:`msynth.simplification.rewrites.DEFAULT_RULES` in a bottom-up
-    fixpoint. Every safe rule is sound under Z3 (verified per-rule in
+    fixpoint (each rule is tried at every node). Every safe rule is sound
+    under Z3 (verified per-rule in
     :mod:`tests.simplification.test_rewrites`) and no-grow on its
     matching input shape. Rule families grouped by what they do:
 
@@ -282,10 +283,11 @@ def gamba_pipeline() -> Pipeline:
 
     Phase-by-phase rationale:
 
-    1. **GambaPreprocessingPass** — applies all 53 ``guarded=False``
-       algebraic rules (idempotence, absorption, two-complement,
+    1. **GambaPreprocessingPass** — applies every ``guarded=False``
+       algebraic rule (idempotence, absorption, two-complement,
        inverse-element, the Tier 3 GAMBA additions) in a bottom-up
-       fixpoint. Every safe rule is no-grow on its matching input, so
+       fixpoint, trying each rule at every node. Every safe rule is
+       no-grow on its matching input, so
        this phase only ever collapses structure. The collapse exposes
        more linear-MBA shapes to SimBA's classifier — patterns that
        would have been rejected as "not linear" in their raw obfuscated

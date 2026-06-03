@@ -67,7 +67,7 @@ class SynthesisState:
         Returns the expression with applied replacements.
 
         If the stored AST is (t1 + t2) * t3 and the mapping
-        {t1: x, t2: y, t3: x}, it returns (x + y) * z.
+        {t1: x, t2: y, t3: x}, it returns (x + y) * x.
 
         Returns:
             Expr: Expression with applied replacements.

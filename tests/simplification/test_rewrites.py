@@ -111,15 +111,17 @@ def _cube_equivalent(left: Expr, right: Expr) -> bool:
         return False
     atoms = sorted(_collect_id_atoms(left) | _collect_id_atoms(right), key=str)
     if len(atoms) > 6:
-        return True  # defer to Z3 / sampling
+        # Too many atoms for an exhaustive cube sweep. Signal "can't check"
+        # rather than silently returning True -- the caller relies on the
+        # mandatory Z3 check instead.
+        raise _CubeUnsupported("too many atoms for exhaustive cube check")
     mask = (1 << left.size) - 1
     for assignment in range(1 << len(atoms)):
         env = {atom: (assignment >> i) & 1 for i, atom in enumerate(atoms)}
-        try:
-            lv = _eval_cube(left, env, mask)
-            rv = _eval_cube(right, env, mask)
-        except _CubeUnsupported:
-            return True
+        # _eval_cube raises _CubeUnsupported on ops outside its fragment;
+        # let that propagate so the caller skips this axis explicitly.
+        lv = _eval_cube(left, env, mask)
+        rv = _eval_cube(right, env, mask)
         if lv != rv:
             return False
     return True
@@ -152,28 +154,39 @@ def _random_sample_equivalent(
     atoms = sorted(_collect_id_atoms(left) | _collect_id_atoms(right), key=str)
     for _ in range(n_samples):
         env = {a: rng.getrandbits(a.size) & ((1 << a.size) - 1) for a in atoms}
-        try:
-            lv = _eval_cube(left, env, mask)
-            rv = _eval_cube(right, env, mask)
-        except _CubeUnsupported:
-            return True
+        # let _CubeUnsupported propagate (see _cube_equivalent); the caller
+        # falls back to the mandatory Z3 check rather than a silent pass.
+        lv = _eval_cube(left, env, mask)
+        rv = _eval_cube(right, env, mask)
         if lv != rv:
             return False
     return True
 
 
 def _assert_sound(input_expr: Expr, output_expr: Expr, name: str) -> None:
-    assert _cube_equivalent(input_expr, output_expr), (
-        f"rule {name}: cube disagreement\n  in:  {input_expr}\n  out: {output_expr}"
-    )
+    # Z3 is the authoritative, op-complete equivalence check and always runs.
     assert _z3_equivalent(input_expr, output_expr), (
         f"rule {name}: z3 found counterexample\n"
         f"  in:  {input_expr}\n  out: {output_expr}"
     )
-    assert _random_sample_equivalent(input_expr, output_expr), (
-        f"rule {name}: random-sample counterexample\n"
-        f"  in:  {input_expr}\n  out: {output_expr}"
-    )
+    # The cube and random-sample axes are redundant cross-checks that only
+    # cover _eval_cube's fragment. When a shape falls outside it (e.g. a
+    # shift, or too many atoms) the helpers raise _CubeUnsupported; we skip
+    # that axis explicitly and rely on the Z3 proof above, rather than
+    # silently reporting a pass.
+    try:
+        assert _cube_equivalent(input_expr, output_expr), (
+            f"rule {name}: cube disagreement\n  in:  {input_expr}\n  out: {output_expr}"
+        )
+    except _CubeUnsupported:
+        pass
+    try:
+        assert _random_sample_equivalent(input_expr, output_expr), (
+            f"rule {name}: random-sample counterexample\n"
+            f"  in:  {input_expr}\n  out: {output_expr}"
+        )
+    except _CubeUnsupported:
+        pass
 
 
 # ---------------------------------------------------------------------------

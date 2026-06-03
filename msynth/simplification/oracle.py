@@ -278,11 +278,13 @@ class SimplificationOracle(object):
         replacements = {}
         # walk over unique variables in the expression
         for v in get_unique_variables(expr):
-            # skip if register pattern does not match
-            if not re.search("^p[0-9]*", v.name):
+            # skip non-placeholders; anchored full match so a real variable
+            # that merely starts with 'p' (e.g. 'ptr') is not misread as a
+            # placeholder and fed to int() below.
+            if not re.fullmatch(r"p[0-9]+", v.name):
                 continue
             # calculate index for p
-            index = int(v.name.strip("p"))
+            index = int(v.name[1:])
             # insert into replacements dictionary
             replacements[v] = ExprInt(inputs_array[index], v.size)
 

@@ -31,11 +31,13 @@ class Mutator:
     each mutation, the synthesis state is cleaned up to avoid dead mutations.
 
     Enabled mutations are managed in the list `mutations`. The list `sizes_casting`
-    stores sizes used in downcasting and upcasting mutations.
+    stores the *bitmasks* (``(1 << width) - 1``) of the distinct subexpression
+    widths, used by the casting mutations.
 
     Attributes:
         grammar (Grammar): Grammar to generate expressions.
-        sizes_casting (List(int)): Sizes for down/upcasting mutations.
+        sizes_casting (List(int)): Bitmasks (one per distinct subexpression
+            width) used by the down/upcasting mutations.
         mutations (List(Any)): List of active mutations.
     """
 
@@ -195,9 +197,17 @@ class Mutator:
         """
         Mutation to downcast a subexpression.
 
-        The mutation randomly selects a subexpression and chooses a size that is smaller than
-        the subexpression's size. Afterward, it semantically downcasts the expression by applying
-        it's bit mask and updates the state accordingly. Finally, the state in cleaned up.
+        The mutation randomly selects a subexpression and a bitmask that is
+        strictly narrower than that subexpression's width, then semantically
+        downcasts it by AND-ing with the mask and updates the state. Finally,
+        the state is cleaned up.
+
+        ``sizes_casting`` holds *bitmasks* (``(1 << width) - 1``), not widths,
+        so the comparison is against the subexpression's full-width mask: a
+        mask is only a genuine downcast when it is smaller than
+        ``(1 << sub_expr.size) - 1``. If no narrower mask is available for the
+        chosen subexpression (e.g. it is already the narrowest width present),
+        the mutation leaves the state unchanged.
 
         Example:
 
@@ -213,14 +223,18 @@ class Mutator:
         # choose random expression from AST
         sub_expr = choice(get_subexpressions(state.expr_ast))
 
-        # choose a random size for downcasting
-        value = choice(self.sizes_casting)
-        # repeat until the chosen size is smaller than the chosen subexpressions'
-        while sub_expr.size - 1 > value:
-            value = choice(self.sizes_casting)
+        # only masks strictly narrower than the subexpression's own width
+        # actually downcast it (a same-width mask would be a no-op AND)
+        full_mask = (1 << sub_expr.size) - 1
+        candidate_masks = [m for m in self.sizes_casting if m < full_mask]
+        if not candidate_masks:
+            # nothing narrower to cast to -- leave the subexpression untouched
+            state.cleanup()
+            return state
 
-        # downcast the subexpression
-        repl = sub_expr & ExprInt(value, sub_expr.size)
+        # choose a random (narrower) bitmask and downcast the subexpression
+        mask = choice(candidate_masks)
+        repl = sub_expr & ExprInt(mask, sub_expr.size)
         # replace expression in AST
         state.expr_ast = state.expr_ast.replace_expr({sub_expr: repl})
 

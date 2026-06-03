@@ -141,14 +141,20 @@ def test_gamba_post_cleans_simba_conjunction_basis_duplicates() -> None:
 
 
 def test_gamba_post_runs_before_ast_normalisation() -> None:
-    # Pipeline ordering: post-rewriter must see the variadic shape SimBA
-    # emits, not the binarised shape. We construct a variadic `+` with
-    # GAMBA-post-eligible structure; if AST norm ran first, the rule
-    # would not match the pattern.
+    # Pipeline ordering: the post-rewriter must see the variadic shape SimBA
+    # emits, not the binarised shape, so GambaPostRewriterPass MUST precede
+    # AstNormalizationPass. Assert that order structurally -- an equivalence
+    # check alone cannot distinguish it (both orders are sound and, for this
+    # input, both even produce the same result).
+    pass_order = [type(p).__name__ for p in gamba_pipeline().passes]
+    assert pass_order.index("GambaPostRewriterPass") < pass_order.index(
+        "AstNormalizationPass"
+    )
+
+    # and the assembled pipeline is still sound on a representative input
     a, b = ExprId("a", _SIZE), ExprId("b", _SIZE)
     inner = ExprOp("+", ExprOp("&", a, b), ExprOp("|", a, b))
-    p = gamba_pipeline()
-    out = p.run(inner)
+    out = gamba_pipeline().run(inner)
     from test_rewrites import _z3_equivalent
 
     assert _z3_equivalent(inner, out)

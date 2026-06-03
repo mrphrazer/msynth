@@ -28,17 +28,21 @@ two-fold:
      deep factorisation) that accept their output only if it strictly
      shrinks the tree. :class:`GambaPostRewriter` adds those.
 
-The engine is intentionally simple — a bottom-up walk with a per-op
-rule index — because the rules themselves carry all the cleverness.
-A ``max_iters`` cap guards against any rule-pair that oscillates;
-the no-grow contract of safe rules makes oscillation rare in practice.
+The engine is intentionally simple — a bottom-up walk that tries every
+rule at each node — because the rules themselves carry all the
+cleverness. Each rule's ``apply`` rejects shapes it does not match, so
+no static op-affinity index is needed (and none is used: a name-based
+index previously disabled rules whose name described an embedded op
+rather than the node's top op). A ``max_iters`` cap guards against any
+rule-pair that oscillates; the no-grow contract of safe rules makes
+oscillation rare in practice.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Dict, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 from miasm.expression.expression import (
     Expr,
@@ -65,11 +69,19 @@ class _GambaEngine:
     Bottom-up fixpoint engine over a fixed rule set.
 
     The walk visits children first (post-order). At each node, the
-    engine tries every rule whose op-key matches; the first rule that
-    returns a non-``None`` rewrite wins, and the walk restarts at the
-    new node (allowing the same node to be reduced repeatedly within
-    one bottom-up pass). The outer loop repeats the whole walk until
-    a fixpoint is reached or ``max_iters`` is hit.
+    engine tries every rule in turn; the first rule that returns a
+    non-``None`` rewrite wins, and the walk restarts at the new node
+    (allowing the same node to be reduced repeatedly within one
+    bottom-up pass). The outer loop repeats the whole walk until a
+    fixpoint is reached or ``max_iters`` is hit.
+
+    Every rule is tried at every node. A rule's ``apply`` callable is
+    responsible for rejecting (returning ``None``) shapes it does not
+    match, so trying it at a non-matching node is cheap and always
+    sound. We deliberately do NOT pre-filter rules by the node's op:
+    a rule's name describes its overall *shape* (which can embed many
+    ops), not the top-level op of the node it rewrites, so any static
+    op-affinity guess risks silently disabling rules.
 
     ``max_iters`` is a safety cap, not a tuning knob — under normal
     operation (all rules ``guarded=False`` net-shrinkers, no
@@ -78,29 +90,10 @@ class _GambaEngine:
     """
 
     rules: Tuple[RewriteRule, ...]
-    rules_by_op: Dict[str, Tuple[RewriteRule, ...]]
-    rules_any_op: Tuple[RewriteRule, ...]
 
     @classmethod
     def build(cls, rules: Sequence[RewriteRule]) -> "_GambaEngine":
-        by_op: Dict[str, List[RewriteRule]] = {}
-        any_op: List[RewriteRule] = []
-        # The current msynth rule family is universally about ExprOp
-        # patterns; we still keep a fallback bucket for rules that
-        # might match without a known op handle (e.g., a future rule
-        # rewriting a bare ExprCond shape).
-        for rule in rules:
-            target_ops = _candidate_ops_for_rule(rule)
-            if not target_ops:
-                any_op.append(rule)
-            else:
-                for op in target_ops:
-                    by_op.setdefault(op, []).append(rule)
-        return cls(
-            rules=tuple(rules),
-            rules_by_op={op: tuple(rs) for op, rs in by_op.items()},
-            rules_any_op=tuple(any_op),
-        )
+        return cls(rules=tuple(rules))
 
     def normalize(self, expr: Expr, max_iters: int = 50) -> Expr:
         for _ in range(max_iters):
@@ -143,16 +136,12 @@ class _GambaEngine:
         return self._apply_at_node(expr)
 
     def _apply_at_node(self, expr: Expr) -> Expr:
-        # Try op-targeted rules first, then any-op rules.
-        candidates: Tuple[RewriteRule, ...] = ()
-        if isinstance(expr, ExprOp):
-            candidates = self.rules_by_op.get(expr.op, ())
-        # Local rewrite loop: re-apply at the same node until quiescent,
-        # since one rule's output may unlock another's pattern.
+        # Local rewrite loop: re-apply every rule at the same node until
+        # quiescent, since one rule's output may unlock another's pattern.
         changed = True
         while changed:
             changed = False
-            for rule in candidates + self.rules_any_op:
+            for rule in self.rules:
                 try:
                     rewritten = rule.apply(expr)
                 except RecursionError:
@@ -164,73 +153,9 @@ class _GambaEngine:
                 if rewritten is None or rewritten == expr:
                     continue
                 expr = rewritten
-                if isinstance(expr, ExprOp):
-                    candidates = self.rules_by_op.get(expr.op, ())
-                else:
-                    candidates = ()
                 changed = True
                 break
         return expr
-
-
-def _candidate_ops_for_rule(rule: RewriteRule) -> Tuple[str, ...]:
-    """
-    Conservative static analysis of a rule's op affinity.
-
-    The current rule catalogue follows a clear naming convention where
-    the family or rule name hints at the op the rule expects. We index
-    on a best-effort basis so the per-node cost is O(matching rules)
-    rather than O(all rules); a rule whose op affinity cannot be
-    inferred ends up in the "any op" bucket and is tried at every
-    ExprOp node.
-    """
-    name = rule.name
-    family = rule.family
-
-    # Explicit hints baked into rule / family names.
-    op_keywords = {
-        "_and": "&",
-        "_or": "|",
-        "_xor": "^",
-        "_add": "+",
-        "_mul": "*",
-        "_shift": None,  # both << and >>
-    }
-
-    # Family-level mapping — broad buckets that fire on multiple ops.
-    family_to_ops: Dict[str, Tuple[str, ...]] = {
-        "inverse_element": ("+",),
-        "two_complement": ("+", "^"),
-        "constant_merge": ("+",),
-        "power_of_two": ("&", "|", "^"),
-        "bitwise_flatten": ("|",),
-        "demorgan": ("^",),  # ~(...) is encoded as ^ all_ones
-        "absorption": ("|", "&"),
-        "redundancy": ("|", "&"),
-        "ring": ("+",),
-        "factor": ("+",),
-    }
-
-    # Per-name override (more specific than family).
-    name_to_ops: Dict[str, Tuple[str, ...]] = {
-        "demorgan_and_to_or": ("^",),
-        "demorgan_or_to_and": ("^",),
-        "or_xor_split": ("|",),
-        "ring_normalize": ("+",),
-        "factor_common_subterm": ("+",),
-    }
-
-    if name in name_to_ops:
-        return name_to_ops[name]
-    if family in family_to_ops:
-        return family_to_ops[family]
-
-    # Conservative fallback: try the rule on every ExprOp.
-    inferred: List[str] = []
-    for keyword, op in op_keywords.items():
-        if keyword in name and op is not None:
-            inferred.append(op)
-    return tuple(inferred) if inferred else ()
 
 
 def _select_safe_rules(rules: Sequence[RewriteRule]) -> Tuple[RewriteRule, ...]:

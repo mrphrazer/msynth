@@ -243,11 +243,11 @@ class Synthesizer:
         Performs an iterative local search (ILS) to synthesize an expression for a given synthesis oracle.
 
         The algorithm tries to find a synthesis state that minimizes the distance function. Starting with an AST
-        representing a single leaf, it iteratively switches between perturbation and side search. The perturbation
-        mutates the best state (found so far) by replacing a subexpression with a leaf node. Afterward, it tries
-        to find better synthesis states in the side search by applying more aggressive mutations. The mutated state is
-        discarded, unless it is better than the current state. If the side search does not find a better state
-        (with a lower score) within 100 iterations, the algorithm continues with perturbation.
+        representing a single leaf, each iteration mutates the current state once and accepts the mutation when its
+        aggregate score improves (a greedy hill-climb). To escape local minima, a stagnation counter forces
+        acceptance of the proposed (possibly worse) state once 100 consecutive iterations pass without an accepted
+        improvement, after which the counter resets. The best-scoring state seen across all iterations is tracked
+        separately and returned.
 
         The algorithm terminates and returns the best state and score if
 

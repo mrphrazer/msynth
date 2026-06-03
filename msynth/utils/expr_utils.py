@@ -122,10 +122,13 @@ def get_unification_candidates(expr: Expr) -> List[Expr]:
 
 def get_subexpressions(expr: Expr) -> List[Expr]:
     """
-    Get all subexpressions in descending order.
+    Get all subexpressions, root first.
 
-    This can be understood as a breadth-first search
-    on an abstract syntax tree from top to bottom.
+    Miasm's ``expr.visit`` walks the tree in post-order (children before
+    parents); reversing that yields a root-first ordering (each node appears
+    before its own descendants). This is NOT a breadth-first traversal -- a
+    node's grandchildren may precede its siblings -- but it does guarantee the
+    full expression comes first and leaves come last.
 
     Args:
         expr: Expr
@@ -171,12 +174,15 @@ def iter_child_expressions(expr: Expr) -> tuple[Expr, ...]:
     using ``expr.graph()`` or recursive visitors. Some simplification candidates
     can become very large after reverse-unification, and graph construction may
     recurse deeply enough to be slow or hit Python recursion limits.
+
+    Repeated siblings are kept (``a + a`` yields ``(a, a)``), so that
+    :func:`bounded_tree_size` counts true expression-tree nodes rather than
+    a structurally-deduplicated graph.
     """
     children = []
 
     def add_child(child: Expr) -> None:
-        if child not in children:
-            children.append(child)
+        children.append(child)
 
     if isinstance(expr, (ExprOp, ExprCompose)):
         for child in expr.args:

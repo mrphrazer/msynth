@@ -78,7 +78,7 @@ class Parallelizer(object):
             # map process to process index
             process_to_index[processes[i]] = i
 
-            # choose task group randomly
+            # record this process's task group (the i-th group)
             process_to_task_group[processes[i]] = self.task_groups[i]
 
         # initialise data structures

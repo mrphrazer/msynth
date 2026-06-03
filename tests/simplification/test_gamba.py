@@ -938,17 +938,45 @@ def test_gamba_substitution_escalation_unlocks_shared_nonlinear_factor() -> None
 
 
 def test_gamba_substitution_escalation_returns_smallest_candidate() -> None:
-    # Three nonlinear leaves; the n=1 escalation tries each combination
-    # and the wrapper returns the smallest restored result. The synthetic
-    # SimBA only fires on the ``x*y`` abstraction (shared between both
-    # products), so the other two combos miss and the loop returns the
-    # one that fired.
-    xy = ExprOp("*", _X, _Y)
-    subtree = ExprOp("+", ExprOp("*", _A, xy), ExprOp("*", _B, xy))
-    out = gamba_substitution(subtree, _placeholder_friendly_simba, max_k=1)
-    assert out is not None
-    # Restored form is ``(a+b)*x*y``.
-    assert isinstance(out, ExprOp) and out.op == "*"
+    # Multiple nonlinear leaves => several abstraction combinations fire.
+    # The synthetic SimBA returns a LARGER candidate on its first firing and
+    # a SMALLER one on every firing afterwards. gamba_substitution must
+    # return the smallest candidate, not merely the first one that fired --
+    # that is the min-selection this test pins down.
+    u = ExprId("u", 64)
+    v = ExprId("v", 64)
+    subtree = ExprOp(
+        "+",
+        ExprOp("*", _A, ExprOp("*", _X, _Y)),
+        ExprOp("*", _B, ExprOp("*", u, v)),
+    )
+
+    large = ExprOp("+", ExprInt(1, 64), ExprInt(2, 64))  # 3 nodes
+    small = ExprInt(7, 64)  # 1 node
+
+    def _has_placeholder(expr: Expr) -> bool:
+        if isinstance(expr, ExprId):
+            return expr.name.startswith("g")
+        return any(_has_placeholder(arg) for arg in getattr(expr, "args", ()))
+
+    fires = {"n": 0}
+
+    def simba(expr: Expr) -> Expr | None:
+        # Only abstracted forms (with a 'g' placeholder) "fire"; the raw
+        # n=0 call misses so escalation proceeds. The constants returned
+        # contain no placeholder, so reverse-abstraction leaves their size
+        # intact and fully under this stub's control.
+        if not _has_placeholder(expr):
+            return None
+        fires["n"] += 1
+        return large if fires["n"] == 1 else small
+
+    out = gamba_substitution(subtree, simba, max_k=2)
+
+    assert fires["n"] >= 2  # several candidates were produced and compared
+    # the smallest restored candidate wins, even though a larger one fired first
+    assert out == small
+    assert _nodes(out) < _nodes(large)
 
 
 def test_gamba_substitution_rejects_when_restored_form_not_smaller() -> None:

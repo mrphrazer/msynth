@@ -529,11 +529,11 @@ class Simplifier:
         self, expr: Expr, simplified: Expr
     ) -> bool:
         """
-        Checks if a simplification candidate is not suitable.
+        Checks whether a simplification candidate is suitable to accept.
 
         This check ensures the semantical correctness of the simplification.
-
-        We skip the simplification candiate
+        The candidate is rejected (this method returns ``False``) in any of the
+        following cases:
 
         1. If the simplification candidate contains any unification variable.
            In this case, not every variable of the simplification candidate
@@ -560,11 +560,14 @@ class Simplifier:
             simplified: Simplified expression candidate.
 
         Returns:
-            True if simplification should be skipped, False otherwise.
+            True if the candidate is suitable and should be accepted, False if
+            it should be skipped.
         """
-        # contains placeholder variables
+        # contains placeholder variables (p0, p1, ...): anchored full match so
+        # real variables that merely start with 'p' (e.g. 'ptr') are not
+        # mistaken for unification placeholders.
         if any(
-            [re.search("^p[0-9]*", v.name) for v in get_unique_variables(simplified)]
+            re.fullmatch(r"p[0-9]+", v.name) for v in get_unique_variables(simplified)
         ):
             return False
         # Reject concrete size regressions before doing SMT work. The helper is

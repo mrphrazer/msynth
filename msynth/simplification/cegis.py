@@ -6,7 +6,12 @@ It is designed to augment oracle-based simplification with constant recovery:
 
 - Templates contain placeholders c0, c1, ... for unknown constants.
 - Subtrees are unified to p0, p1, ... before solving.
-- Z3 is used to solve constants; validation adds counterexamples to refine.
+- Z3 is used to solve the constants from a handful of I/O samples, and then
+  again to *prove* the resulting candidate equal to the subtree for all
+  inputs. A candidate is accepted only on an UNSAT (provably-equal) verdict;
+  a SAT verdict yields a counterexample that refines the next solve, and an
+  ``unknown`` (timeout) verdict rejects the candidate. I/O sampling alone is
+  only a fast pre-filter and never certifies a result.
 
 The solver is conservative by design and meant to be used as a fallback when
 the main oracle lookup fails.
@@ -440,6 +445,7 @@ class CegisSolver:
         validation_samples: int = 16,
         expand_templates: bool = True,
         expansion_budget: int = 40,
+        seed: int = 0,
     ) -> None:
         """
         Initializes the CEGIS solver.
@@ -453,6 +459,10 @@ class CegisSolver:
             validation_samples: Samples per validation iteration.
             expand_templates: Enable adaptive template expansion.
             expansion_budget: Max expanded templates to consider.
+            seed: Seed for the validation-sampling RNG. Sampling is only a
+                cheap pre-filter (acceptance is gated by a Z3 equivalence
+                proof, see :meth:`_prove_equivalent`), but a fixed seed keeps
+                the refinement path reproducible across runs.
         """
         self.template_oracle = template_oracle
         self.max_templates = max_templates
@@ -463,6 +473,7 @@ class CegisSolver:
         self.expand_templates = expand_templates
         self.expansion_budget = expansion_budget
         self._translator_z3 = TranslatorZ3()
+        self._rng = random.Random(seed)
 
     @staticmethod
     def _resize_expr(expr: Expr, size: int) -> Expr:
@@ -510,7 +521,10 @@ class CegisSolver:
                 CegisSolver._resize_expr(expr.src, size),
             )
         if isinstance(expr, ExprMem):
-            return ExprMem(CegisSolver._resize_expr(expr.ptr, size), expr.size)
+            # The "value" of a memory access is the loaded word; resizing
+            # means changing the access width to ``size``. The pointer is an
+            # address expression and must keep its own width untouched.
+            return ExprMem(expr.ptr, size)
         return expr
 
     @staticmethod
@@ -546,10 +560,15 @@ class CegisSolver:
         # Use SimplificationOracle evaluation to respect Miasm semantics.
         return SimplificationOracle.evaluate_expression(expr, inputs)
 
-    @staticmethod
-    def _gen_validation_inputs(num_vars: int, size: int, count: int) -> List[List[int]]:
+    def _gen_validation_inputs(
+        self, num_vars: int, size: int, count: int
+    ) -> List[List[int]]:
         """
         Generates a deterministic prefix of inputs, then fills with random values.
+
+        The random tail is drawn from the solver's seeded RNG (``self._rng``),
+        so a given solver instance produces the same validation inputs across
+        runs.
 
         Args:
             num_vars: Number of unified variables.
@@ -569,7 +588,9 @@ class CegisSolver:
         ]
         inputs = base[: min(len(base), count)]
         while len(inputs) < count:
-            inputs.append([random.getrandbits(size) & mask for _ in range(num_vars)])
+            inputs.append(
+                [self._rng.getrandbits(size) & mask for _ in range(num_vars)]
+            )
         return inputs
 
     def _validate_candidate(
@@ -599,6 +620,61 @@ class CegisSolver:
             if expected != actual:
                 return inputs
         return None
+
+    def _prove_equivalent(
+        self,
+        unified_subtree: Expr,
+        candidate: Expr,
+        num_vars: int,
+    ) -> "tuple[str, Optional[List[int]]]":
+        """
+        Proves whether ``candidate`` is semantically equal to
+        ``unified_subtree`` for *all* values of the unified ``pN`` variables.
+
+        Sampling validation (:meth:`_validate_candidate`) only checks a finite
+        set of inputs and can therefore accept a candidate that merely overfits
+        the samples. This method closes that gap with a real Z3 query: it
+        asserts the two expressions *differ* and inspects the result.
+
+        Returns a ``(status, counterexample)`` pair:
+
+        * ``("equivalent", None)`` — Z3 returned ``unsat``: the candidate is
+          provably equal on every input. Only this verdict is safe to accept.
+        * ``("counterexample", inputs)`` — Z3 returned ``sat``: ``inputs`` is a
+          concrete assignment on which the two disagree (fed back into the
+          refinement loop).
+        * ``("unknown", None)`` — Z3 could not decide (timeout / translation
+          failure). Treated as *not proven*; the candidate must NOT be
+          accepted on this verdict.
+        """
+        try:
+            z3_lhs = self._translator_z3.from_expr(unified_subtree)
+            z3_rhs = self._translator_z3.from_expr(candidate)
+        except Exception:
+            # A translation failure means we cannot certify equivalence.
+            return ("unknown", None)
+
+        solver = z3.Solver()
+        solver.set("timeout", self.solver_timeout * 1000)
+        solver.add(z3_lhs != z3_rhs)
+        result = solver.check()
+
+        if result == z3.unsat:
+            return ("equivalent", None)
+        if result == z3.sat:
+            model = solver.model()
+            p_vars = self._placeholder_vars(unified_subtree, "p")
+            p_vars += [v for v in self._placeholder_vars(candidate, "p") if v not in p_vars]
+            counterexample = [0] * num_vars
+            for p_var in p_vars:
+                idx = int(p_var.name[1:])
+                if idx >= num_vars:
+                    continue
+                bv = z3.BitVec(p_var.name, p_var.size)
+                counterexample[idx] = model.eval(bv, model_completion=True).as_long()
+            return ("counterexample", counterexample)
+        # z3.unknown -- cannot certify; do not accept.
+        return ("unknown", None)
 
     def _expand_templates(self, templates: List[Expr], size: int) -> List[Expr]:
         """
@@ -731,7 +807,13 @@ class CegisSolver:
         2) Looks up candidate templates by truncated key; falls back to all
            templates if no key matches.
         3) Solves placeholder constants with Z3 and reconstructs the candidate.
-        4) Reverses unification (pN -> original terminals) before returning.
+        4) Validates the candidate against the subtree: cheap sampling first,
+           then a Z3 equivalence *proof* (:meth:`_prove_equivalent`). A
+           candidate is only returned when Z3 proves it equal on every input;
+           a Z3 counterexample feeds counterexample-guided refinement, and a
+           Z3 ``unknown`` (timeout) is treated as "not proven" (candidate
+           rejected). Sampling alone never certifies a result.
+        5) Reverses unification (pN -> original terminals) before returning.
 
         Args:
             subtree: Original subtree (used for size and final mapping).
@@ -739,7 +821,8 @@ class CegisSolver:
             unification_dict: Map from original terminals to pN variables.
 
         Returns:
-            Candidate expression with constants instantiated, or None.
+            Candidate expression with constants instantiated (Z3-proven
+            equivalent to ``subtree``), or None.
 
         Example:
             >>> from msynth.utils.unification import gen_unification_dict
@@ -747,7 +830,7 @@ class CegisSolver:
             >>> udict = gen_unification_dict(subtree)        # {v0: p0}
             >>> unified = subtree.replace_expr(udict)         # p0*0x47 + 0x13
             >>> solver.try_synthesize(subtree, unified, udict)
-            ExprOp('+', ExprOp('*', v0, ExprInt(0x47, 8)), ExprInt(0x13, 8))
+            ExprOp('+', ExprOp('*', ExprInt(0x47, 8), v0), ExprInt(0x13, 8))
         """
         if len(unification_dict) > self.max_variables:
             return None
@@ -763,8 +846,12 @@ class CegisSolver:
             self.template_oracle.get_skeleton_templates(unified_subtree)
         )
 
-        # Tier 2 (existing): I/O-behaviour-keyed lookup. Still useful for
-        # the rare case of exact behavioural match on the truncated key.
+        # Tier 2: I/O-behaviour-keyed lookup. NOTE: oracles built by
+        # ``gen_runtime_oracle`` store every template under the synthetic "*"
+        # bucket (not under an I/O key), so for the default runtime oracle this
+        # tier returns nothing and only the skeleton tier (1) and full-scan
+        # tier (3) carry the load. It still works for oracles populated by hand
+        # via ``add_template(template, outputs)`` with real I/O keys.
         equiv_key = self.template_oracle.determine_equiv_key(base_outputs)
         keyed_templates = list(self.template_oracle.get_templates(equiv_key))
 
@@ -817,7 +904,21 @@ class CegisSolver:
                     unified_subtree, candidate, num_vars, subtree.size
                 )
                 if counterexample is None:
-                    return reverse_unification(candidate, unification_dict)
+                    # Sampling found no disagreement -- now PROVE it with Z3
+                    # before accepting (sampling alone can be overfit).
+                    status, proof_cex = self._prove_equivalent(
+                        unified_subtree, candidate, num_vars
+                    )
+                    if status == "equivalent":
+                        return reverse_unification(candidate, unification_dict)
+                    if status == "unknown":
+                        # Cannot certify this template's candidate; a refined
+                        # constant would not change the proof outcome, so move
+                        # on to the next template rather than spin.
+                        break
+                    # status == "counterexample": Z3 found an input the cheap
+                    # sampling missed; fall through to refine with it.
+                    counterexample = proof_cex
 
                 # Counterexample-guided refinement: add failing input/output.
                 inputs.append(counterexample)

@@ -751,10 +751,11 @@ def _apply_redundancy_and_not(expr: Expr) -> Optional[Expr]:
 def _factors_of(arg: Expr) -> List[Expr]:
     """Decompose ``arg`` into a multiplicative factor list.
 
-    ``a * b * c`` -> ``[a, b, c]``. Bare ``x`` -> ``[x]``. A unary
-    ``-arg`` is treated as the factor list of ``arg`` extended with a
-    ``-1`` constant so the common-factor matching works on the
-    underlying product.
+    ``a * b * c`` -> ``[a, b, c]``. Any other shape (a bare ``x``, a
+    unary ``-x``, a sum, ...) is treated as a single opaque factor and
+    returned as ``[arg]``. In particular a negation is *not* split into
+    ``[x, -1]``: the common-factor matching only sees explicit ``*``
+    products, so ``a*b + -(a*c)`` is left to miasm / ``ring_normalize``.
     """
     if isinstance(arg, ExprOp) and arg.op == "*":
         return list(arg.args)
@@ -1314,18 +1315,17 @@ def _apply_disj_conj_negation_absorb(expr: Expr) -> Optional[Expr]:
                 isinstance(inner, ExprOp) and inner.op == "&" and len(inner.args) == 2
             ):
                 continue
-            # One side must be ``~x`` (or ``~(-x)``), the other a multiple of
-            # ``2*x`` or ``2*(-x)``.
+            # Both clause operands must reference the *same* base ``x``:
+            # one side ``~x``, the other ``2*x``. Mixing bases (e.g.
+            # ``~(-x) & 2*x``) is NOT absorbed by ``-x`` and would be unsound.
             for not_idx in (0, 1):
                 cand_not = inner.args[not_idx]
                 cand_double = inner.args[1 - not_idx]
                 not_inner = _is_not(cand_not)
-                if not_inner is None:
-                    continue
-                if not_inner != x and not_inner != args[i]:
+                if not_inner != x:
                     continue
                 doubled = _arith_double_of(cand_double)
-                if doubled == x or doubled == args[i]:
+                if doubled == x:
                     return _drop_clause(expr, "|", j)
     return None
 
@@ -1334,8 +1334,8 @@ def _apply_disj_neg_disj_identity(expr: Expr) -> Optional[Expr]:
     """``x | -(-x | 2*x) → x``.
 
     Conservative variant of the broader GAMBA identity: the inner OR is
-    of ``-x`` and ``2*x`` (or ``-x`` and ``-2*x``), so the negated result
-    is fully covered by ``x``.
+    of ``-x`` and ``2*x`` (``_arith_double_of`` only recognises the
+    coefficient ``2``), so the negated result is fully covered by ``x``.
     """
     if not (isinstance(expr, ExprOp) and expr.op == "|" and len(expr.args) >= 2):
         return None
@@ -1532,19 +1532,6 @@ def _apply_bitwise_in_sum_cancel(expr: Expr) -> Optional[Expr]:
 # net-shrink the AST whenever they fire.
 
 
-def _const_xor_with_atom(expr: Expr) -> Optional[Tuple[int, Expr]]:
-    """If ``expr`` is ``c ^ X`` (with c an ExprInt, X non-constant), return
-    ``(int(c), X)``; otherwise ``None``."""
-    if not (isinstance(expr, ExprOp) and expr.op == "^" and len(expr.args) == 2):
-        return None
-    a, b = expr.args
-    if isinstance(a, ExprInt) and not isinstance(b, ExprInt):
-        return int(a), b
-    if isinstance(b, ExprInt) and not isinstance(a, ExprInt):
-        return int(b), a
-    return None
-
-
 def _const_or_with_atom(expr: Expr) -> Optional[Tuple[int, Expr]]:
     """If ``expr`` is ``c | X`` (with c an ExprInt, X non-constant), return
     ``(int(c), X)``; otherwise ``None``."""
@@ -1556,39 +1543,6 @@ def _const_or_with_atom(expr: Expr) -> Optional[Tuple[int, Expr]]:
     if isinstance(b, ExprInt) and not isinstance(a, ExprInt):
         return int(b), a
     return None
-
-
-def _xor_pairs_with_disjoint_constants(x: Expr, y: Expr) -> Optional[Expr]:
-    """``(c1 ^ X) + (c2 ^ X) -> 2*(~(c1+c2) & X) + c1 + c2`` when
-    ``c1 & c2 == 0``. Sound because on the bit positions inside ``c1`` or
-    ``c2`` the XOR toggles ``X``'s bit exactly once, while on bit positions
-    not in either constant both XORs leave ``X`` unchanged, contributing
-    ``2*X`` (covered by the ``2*(~(c1+c2) & X)`` term)."""
-    fx = _const_xor_with_atom(x)
-    fy = _const_xor_with_atom(y)
-    if fx is None or fy is None:
-        return None
-    c1, atom_x = fx
-    c2, atom_y = fy
-    if atom_x != atom_y:
-        return None
-    size = x.size
-    mask = _mask(size)
-    if (c1 & c2) & mask != 0:
-        return None
-    const_sum = (c1 + c2) & mask
-    not_sum = (~const_sum) & mask
-    two = ExprInt(2, size)
-    merged_and = ExprOp("&", ExprInt(not_sum, size), atom_x)
-    return ExprOp(
-        "+",
-        ExprOp("*", two, merged_and),
-        ExprInt(const_sum, size),
-    )
-
-
-def _apply_xor_pairs_with_disjoint_constants(expr: Expr) -> Optional[Expr]:
-    return _replace_pair_in_sum(expr, _xor_pairs_with_disjoint_constants)
 
 
 def _or_pairs_with_disjoint_constants(x: Expr, y: Expr) -> Optional[Expr]:

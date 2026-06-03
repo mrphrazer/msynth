@@ -43,6 +43,17 @@ def _semantically_equivalent(a, b, variables, *, seed: int, trials: int = 16) ->
     return True
 
 
+def _exhaustively_equivalent(a, b, variables) -> bool:
+    """Exhaustive equivalence over every assignment (small bit-widths only)."""
+    import itertools
+
+    size = variables[0].size
+    for values in itertools.product(range(1 << size), repeat=len(variables)):
+        if _eval(a, variables, list(values)) != _eval(b, variables, list(values)):
+            return False
+    return True
+
+
 def test_cegis_off_by_default() -> None:
     """Regression test: no opt-in -> no CEGIS solver, no behavioural change."""
     s = Simplifier()
@@ -51,47 +62,59 @@ def test_cegis_off_by_default() -> None:
 
 def test_cegis_recovers_constant_oracle_cannot() -> None:
     """
-    The empty oracle has no equivalence class for any subtree. The
-    expression `v0 * 0x47 + 0x13` uses arbitrary constants no precomputed
-    oracle could cover. CEGIS off -> input unchanged. CEGIS on -> the
-    `p0 * c0 + c1` template solves the constants and the simplifier
-    accepts an equivalent (semantically identical) candidate.
+    The expression `v0 * 0x47 + 0x13` uses arbitrary constants no
+    precomputed oracle could cover. We exercise CEGIS directly: the
+    `(c0 * p0) + c1` template must solve the constants and ``try_synthesize``
+    must return a candidate.
+
+    Because ``try_synthesize`` now gates acceptance on a Z3 equivalence
+    *proof* (not just sampling), a non-None result is itself proof that
+    CEGIS synthesised a provably-equivalent expression -- the assertion
+    would fail (return None) if the recovered constants were wrong. This is
+    why the test no longer merely checks ``equiv(out, input)`` against a
+    Simplifier whose output equals the input (which held even with CEGIS
+    disabled).
     """
     size = 8
     v0 = ExprId("v0", size)
     expr = v0 * ExprInt(0x47, size) + ExprInt(0x13, size)
 
-    # Baseline: nothing happens without CEGIS on an empty oracle.
-    baseline = Simplifier(enable_cegis=False)
-    out_off = baseline.simplify(expr)
-    assert expr_simp(out_off) == expr_simp(expr)
+    # Sanity: the legacy Simplifier path leaves the input unchanged without
+    # CEGIS (and even with CEGIS, since the recovered candidate is not
+    # *smaller* -- which is exactly why we must test try_synthesize directly).
+    assert expr_simp(Simplifier(enable_cegis=False).simplify(expr)) == expr_simp(expr)
 
-    # CEGIS on: must produce a semantically equivalent expression.
-    cegis = Simplifier(
-        enable_cegis=True,
-        cegis_max_variables=1,
-    )
-    out_on = cegis.simplify(expr)
-    assert _semantically_equivalent(out_on, expr, [v0], seed=1)
+    oracle = TemplateOracle.gen_runtime_oracle(num_variables=1)
+    solver = CegisSolver(oracle, max_variables=1)
+    unification_dict = gen_unification_dict(expr)
+    unified = expr.replace_expr(unification_dict)
+
+    candidate = solver.try_synthesize(expr, unified, unification_dict)
+    assert candidate is not None  # CEGIS synthesised a Z3-proven candidate
+    # independent (exhaustive) confirmation of the recovered constants
+    assert _exhaustively_equivalent(candidate, expr, [v0])
 
 
 def test_cegis_solves_two_variable_template() -> None:
     """
     Two-variable template `(p0 & c0) | (p1 & c1)` is in the runtime
     template set. CEGIS should recover the masks 0x0F and 0xF0 from the
-    expression's I/O behaviour even though the oracle is empty.
+    expression's I/O behaviour and ``try_synthesize`` must return a
+    (Z3-proven-equivalent) candidate.
     """
     size = 8
     v0 = ExprId("v0", size)
     v1 = ExprId("v1", size)
     expr = (v0 & ExprInt(0x0F, size)) | (v1 & ExprInt(0xF0, size))
 
-    s = Simplifier(
-        enable_cegis=True,
-        cegis_max_variables=2,
-    )
-    out = s.simplify(expr)
-    assert _semantically_equivalent(out, expr, [v0, v1], seed=2)
+    oracle = TemplateOracle.gen_runtime_oracle(num_variables=2)
+    solver = CegisSolver(oracle, max_variables=2)
+    unification_dict = gen_unification_dict(expr)
+    unified = expr.replace_expr(unification_dict)
+
+    candidate = solver.try_synthesize(expr, unified, unification_dict)
+    assert candidate is not None  # CEGIS synthesised a Z3-proven candidate
+    assert _semantically_equivalent(candidate, expr, [v0, v1], seed=2)
 
 
 def test_cegis_refinement_recovers_constant() -> None:
