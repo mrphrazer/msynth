@@ -67,13 +67,11 @@ def test_cegis_recovers_constant_oracle_cannot() -> None:
     `(c0 * p0) + c1` template must solve the constants and ``try_synthesize``
     must return a candidate.
 
-    Because ``try_synthesize`` now gates acceptance on a Z3 equivalence
-    *proof* (not just sampling), a non-None result is itself proof that
-    CEGIS synthesised a provably-equivalent expression -- the assertion
-    would fail (return None) if the recovered constants were wrong. This is
-    why the test no longer merely checks ``equiv(out, input)`` against a
-    Simplifier whose output equals the input (which held even with CEGIS
-    disabled).
+    ``try_synthesize`` is sample-validated (it does not self-prove; the
+    simplifier's shared suitability gate enforces equivalence). For these clean
+    affine/mask targets the recovered constants are exact, so we confirm the
+    candidate independently with an exhaustive/Z3 equivalence check below rather
+    than relying on a non-None result alone.
     """
     size = 8
     v0 = ExprId("v0", size)
@@ -90,7 +88,7 @@ def test_cegis_recovers_constant_oracle_cannot() -> None:
     unified = expr.replace_expr(unification_dict)
 
     candidate = solver.try_synthesize(expr, unified, unification_dict)
-    assert candidate is not None  # CEGIS synthesised a Z3-proven candidate
+    assert candidate is not None  # CEGIS synthesised a candidate (equivalence checked below)
     # independent (exhaustive) confirmation of the recovered constants
     assert _exhaustively_equivalent(candidate, expr, [v0])
 
@@ -99,8 +97,8 @@ def test_cegis_solves_two_variable_template() -> None:
     """
     Two-variable template `(p0 & c0) | (p1 & c1)` is in the runtime
     template set. CEGIS should recover the masks 0x0F and 0xF0 from the
-    expression's I/O behaviour and ``try_synthesize`` must return a
-    (Z3-proven-equivalent) candidate.
+    expression's I/O behaviour and ``try_synthesize`` must return a candidate
+    (sample-validated; equivalence confirmed independently below).
     """
     size = 8
     v0 = ExprId("v0", size)
@@ -113,7 +111,7 @@ def test_cegis_solves_two_variable_template() -> None:
     unified = expr.replace_expr(unification_dict)
 
     candidate = solver.try_synthesize(expr, unified, unification_dict)
-    assert candidate is not None  # CEGIS synthesised a Z3-proven candidate
+    assert candidate is not None  # CEGIS synthesised a candidate (equivalence checked below)
     assert _semantically_equivalent(candidate, expr, [v0, v1], seed=2)
 
 

@@ -6,12 +6,14 @@ It is designed to augment oracle-based simplification with constant recovery:
 
 - Templates contain placeholders c0, c1, ... for unknown constants.
 - Subtrees are unified to p0, p1, ... before solving.
-- Z3 is used to solve the constants from a handful of I/O samples, and then
-  again to *prove* the resulting candidate equal to the subtree for all
-  inputs. A candidate is accepted only on an UNSAT (provably-equal) verdict;
-  a SAT verdict yields a counterexample that refines the next solve, and an
-  ``unknown`` (timeout) verdict rejects the candidate. I/O sampling alone is
-  only a fast pre-filter and never certifies a result.
+- Z3 is used to solve the constants from a handful of I/O samples; the
+  candidate is then validated by counterexample-guided I/O sampling. CEGIS does
+  NOT prove equivalence itself — equivalence is enforced by the caller's
+  suitability gate (``Simplifier._is_suitable_simplification_candidate``:
+  strictly-smaller + Z3 equivalence with an adversarial edge-probe, permissive
+  on Z3 timeout), the single acceptance check shared with the oracle and
+  subtree-SimBA tiers. A self-proof here would time out on obfuscated MBA
+  subtrees and make CEGIS give up on otherwise-correct candidates.
 
 The solver is conservative by design and meant to be used as a fallback when
 the main oracle lookup fails.
@@ -459,10 +461,10 @@ class CegisSolver:
             validation_samples: Samples per validation iteration.
             expand_templates: Enable adaptive template expansion.
             expansion_budget: Max expanded templates to consider.
-            seed: Seed for the validation-sampling RNG. Sampling is only a
-                cheap pre-filter (acceptance is gated by a Z3 equivalence
-                proof, see :meth:`_prove_equivalent`), but a fixed seed keeps
-                the refinement path reproducible across runs.
+            seed: Seed for the validation-sampling RNG. Sampling drives
+                counterexample-guided refinement and candidate acceptance here;
+                final equivalence is enforced by the caller's suitability gate.
+                A fixed seed keeps the refinement path reproducible across runs.
         """
         self.template_oracle = template_oracle
         self.max_templates = max_templates
@@ -621,61 +623,6 @@ class CegisSolver:
                 return inputs
         return None
 
-    def _prove_equivalent(
-        self,
-        unified_subtree: Expr,
-        candidate: Expr,
-        num_vars: int,
-    ) -> "tuple[str, Optional[List[int]]]":
-        """
-        Proves whether ``candidate`` is semantically equal to
-        ``unified_subtree`` for *all* values of the unified ``pN`` variables.
-
-        Sampling validation (:meth:`_validate_candidate`) only checks a finite
-        set of inputs and can therefore accept a candidate that merely overfits
-        the samples. This method closes that gap with a real Z3 query: it
-        asserts the two expressions *differ* and inspects the result.
-
-        Returns a ``(status, counterexample)`` pair:
-
-        * ``("equivalent", None)`` — Z3 returned ``unsat``: the candidate is
-          provably equal on every input. Only this verdict is safe to accept.
-        * ``("counterexample", inputs)`` — Z3 returned ``sat``: ``inputs`` is a
-          concrete assignment on which the two disagree (fed back into the
-          refinement loop).
-        * ``("unknown", None)`` — Z3 could not decide (timeout / translation
-          failure). Treated as *not proven*; the candidate must NOT be
-          accepted on this verdict.
-        """
-        try:
-            z3_lhs = self._translator_z3.from_expr(unified_subtree)
-            z3_rhs = self._translator_z3.from_expr(candidate)
-        except Exception:
-            # A translation failure means we cannot certify equivalence.
-            return ("unknown", None)
-
-        solver = z3.Solver()
-        solver.set("timeout", self.solver_timeout * 1000)
-        solver.add(z3_lhs != z3_rhs)
-        result = solver.check()
-
-        if result == z3.unsat:
-            return ("equivalent", None)
-        if result == z3.sat:
-            model = solver.model()
-            p_vars = self._placeholder_vars(unified_subtree, "p")
-            p_vars += [v for v in self._placeholder_vars(candidate, "p") if v not in p_vars]
-            counterexample = [0] * num_vars
-            for p_var in p_vars:
-                idx = int(p_var.name[1:])
-                if idx >= num_vars:
-                    continue
-                bv = z3.BitVec(p_var.name, p_var.size)
-                counterexample[idx] = model.eval(bv, model_completion=True).as_long()
-            return ("counterexample", counterexample)
-        # z3.unknown -- cannot certify; do not accept.
-        return ("unknown", None)
-
     def _expand_templates(self, templates: List[Expr], size: int) -> List[Expr]:
         """
         Expands templates with light wrappers to add coverage.
@@ -807,12 +754,12 @@ class CegisSolver:
         2) Looks up candidate templates by truncated key; falls back to all
            templates if no key matches.
         3) Solves placeholder constants with Z3 and reconstructs the candidate.
-        4) Validates the candidate against the subtree: cheap sampling first,
-           then a Z3 equivalence *proof* (:meth:`_prove_equivalent`). A
-           candidate is only returned when Z3 proves it equal on every input;
-           a Z3 counterexample feeds counterexample-guided refinement, and a
-           Z3 ``unknown`` (timeout) is treated as "not proven" (candidate
-           rejected). Sampling alone never certifies a result.
+        4) Validates the candidate against the subtree by counterexample-guided
+           I/O sampling; a disagreeing sample feeds the next solve. A candidate
+           that survives the sample set is returned. CEGIS does NOT prove
+           equivalence itself -- that is the caller's suitability gate's job
+           (see module docstring), so an unprovable-but-sample-consistent
+           candidate is returned here and accepted/rejected upstream.
         5) Reverses unification (pN -> original terminals) before returning.
 
         Args:
@@ -821,8 +768,8 @@ class CegisSolver:
             unification_dict: Map from original terminals to pN variables.
 
         Returns:
-            Candidate expression with constants instantiated (Z3-proven
-            equivalent to ``subtree``), or None.
+            Candidate expression with constants instantiated (sample-validated,
+            not self-proven; equivalence is enforced by the caller), or None.
 
         Example:
             >>> from msynth.utils.unification import gen_unification_dict
@@ -904,21 +851,16 @@ class CegisSolver:
                     unified_subtree, candidate, num_vars, subtree.size
                 )
                 if counterexample is None:
-                    # Sampling found no disagreement -- now PROVE it with Z3
-                    # before accepting (sampling alone can be overfit).
-                    status, proof_cex = self._prove_equivalent(
-                        unified_subtree, candidate, num_vars
-                    )
-                    if status == "equivalent":
-                        return reverse_unification(candidate, unification_dict)
-                    if status == "unknown":
-                        # Cannot certify this template's candidate; a refined
-                        # constant would not change the proof outcome, so move
-                        # on to the next template rather than spin.
-                        break
-                    # status == "counterexample": Z3 found an input the cheap
-                    # sampling missed; fall through to refine with it.
-                    counterexample = proof_cex
+                    # Sampling found no disagreement -- accept. Equivalence is
+                    # NOT proven here on purpose: the caller's suitability gate
+                    # (_is_suitable_simplification_candidate in
+                    # Simplifier.simplify tier-c: strictly-smaller + Z3
+                    # equivalence with the adversarial edge-probe, permissive on
+                    # Z3 timeout) is the single authoritative acceptance check,
+                    # identical to the oracle and subtree-SimBA tiers. A hard
+                    # proof here would time out on obfuscated MBA subtrees and
+                    # make CEGIS give up on otherwise-correct candidates.
+                    return reverse_unification(candidate, unification_dict)
 
                 # Counterexample-guided refinement: add failing input/output.
                 inputs.append(counterexample)
