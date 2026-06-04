@@ -8,10 +8,65 @@ from typing import Iterator
 from miasm.expression.expression import Expr
 
 from msynth.parsing.infix import InfixParseError, parse_infix_expr
+from msynth.utils.expr_utils import parse_expr
 
 
 class DatasetParseError(ValueError):
     """Raised when a dataset row cannot be split or parsed."""
+
+
+# Corpus rows carry their expression in one of two encodings:
+#   - "ir"    : a Miasm IR repr string (e.g. produced by TranslatorMiasm),
+#               read back via eval (``parse_expr``). Field: ``expr_miasm`` /
+#               ``expr_repr`` (+ optional ``expected_miasm`` / ``expected_repr``).
+#               This is the encoding used by the real-world MBA datasets, which
+#               carry slices/compose/extends/multi-size memory that infix cannot
+#               represent. Sizes are embedded in the repr, so ``size`` is ignored.
+#   - "infix" : a CoBRA/SiMBA-style infix string. Field: ``expr_text``
+#               (+ optional ``expected_text``); parsed with ``parse_infix_expr``
+#               at the given bit-vector ``size``.
+_IR_EXPR_FIELDS = ("expr_miasm", "expr_repr")
+_IR_EXPECTED_FIELDS = ("expected_miasm", "expected_repr")
+
+
+def detect_corpus_encoding(row: dict) -> str:
+    """Return the expression encoding of a corpus row: ``"ir"`` or ``"infix"``."""
+    if any(field in row for field in _IR_EXPR_FIELDS):
+        return "ir"
+    if "expr_text" in row:
+        return "infix"
+    raise DatasetParseError(
+        "corpus row has no expression field "
+        "(expected one of expr_miasm / expr_repr / expr_text)"
+    )
+
+
+def corpus_expr_field(row: dict, *, expected: bool = False) -> str | None:
+    """Return the raw expression string for a row (or its expected, if present).
+
+    Independent of encoding; returns ``None`` when the (optional) expected field
+    is absent or empty."""
+    fields = (
+        (*_IR_EXPECTED_FIELDS, "expected_text")
+        if expected
+        else (*_IR_EXPR_FIELDS, "expr_text")
+    )
+    for field in fields:
+        if field in row and row[field] not in (None, ""):
+            return str(row[field])
+    return None
+
+
+def parse_corpus_expression(expr_str: str, *, encoding: str, size: int = 64) -> Expr:
+    """Parse a corpus expression string according to its encoding.
+
+    ``encoding="ir"``    -> Miasm IR repr via ``parse_expr`` (eval); ``size`` ignored.
+    ``encoding="infix"`` -> CoBRA infix via ``parse_infix_expr`` at ``size``."""
+    if encoding == "ir":
+        return parse_expr(expr_str)
+    if encoding == "infix":
+        return parse_infix_expr(expr_str, size=size)
+    raise DatasetParseError(f"unknown corpus encoding: {encoding!r}")
 
 
 @dataclass(frozen=True)

@@ -235,3 +235,73 @@ def test_run_simplification_corpus_script_limit_uses_initial_rows(
     assert "checked=1" in result.stdout
     assert "ground_truth=1" in result.stdout
     assert "case_000001" not in result.stderr
+
+
+def ir_record(**updates: object) -> dict[str, object]:
+    """A row in the real-world IR encoding: ``expr_miasm`` (no ``expected``,
+    no ``suite``), as produced by the generalized real-world MBA dataset."""
+    record: dict[str, object] = {
+        "id": "case_000000",
+        "source": "game",
+        "expr_miasm": "ExprOp('+', ExprId('x0', 8), ExprInt(0x0, 8))",  # x0 + 0 -> x0
+        "size": 8,
+    }
+    record.update(updates)
+    return record
+
+
+def test_run_simplification_corpus_script_accepts_ir_format(tmp_path: Path) -> None:
+    # IR-encoded row, no ground truth: msynth folds x0 + 0 -> x0, so the row is
+    # scored "shorter" (passed) purely by node-count reduction.
+    oracle = write_min_oracle(tmp_path)
+    corpus = write_corpus(tmp_path, [ir_record()])
+
+    result = run_script(
+        "--corpus", str(corpus), "--oracle", str(oracle),
+        "--limit", "1", "--jobs", "1", "--mode", "AST",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "checked=1" in result.stdout
+    assert "passed=1" in result.stdout
+    assert "shorter=1" in result.stdout
+    assert "ground_truth=0" in result.stdout
+    assert result.stderr == ""
+
+
+def test_run_simplification_corpus_script_ir_format_with_expected(tmp_path: Path) -> None:
+    # IR-encoded row WITH an expected_miasm ground truth -> ground_truth status.
+    oracle = write_min_oracle(tmp_path)
+    corpus = write_corpus(
+        tmp_path,
+        [ir_record(expected_miasm="ExprId('x0', 8)")],
+    )
+
+    result = run_script(
+        "--corpus", str(corpus), "--oracle", str(oracle),
+        "--limit", "1", "--jobs", "1", "--mode", "AST",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "checked=1" in result.stdout
+    assert "ground_truth=1" in result.stdout
+
+
+def test_run_simplification_corpus_script_sources_filter(tmp_path: Path) -> None:
+    # --sources keeps only matching rows (generalized dataset uses source).
+    oracle = write_min_oracle(tmp_path)
+    corpus = write_corpus(
+        tmp_path,
+        [
+            ir_record(id="case_000000", source="game"),
+            ir_record(id="case_000001", source="anticheat"),
+        ],
+    )
+
+    result = run_script(
+        "--corpus", str(corpus), "--oracle", str(oracle),
+        "--limit", "0", "--jobs", "1", "--mode", "AST", "--sources", "game",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "checked=1" in result.stdout

@@ -5,15 +5,74 @@ scripts. Corpus files live under [`corpora/`](corpora/).
 
 These datasets provide stable inputs for evaluating MBA handling in msynth. The
 CoBRA-derived corpus is meant to stress parsing and oracle-backed simplification
-on a broad set of real MBA benchmark expressions, while the synthesis corpus is
-a smaller controlled suite for checking stochastic synthesis behavior.
+on a broad set of real MBA benchmark expressions; the real-world corpus is a large
+set of MBAs harvested from production obfuscated software; and the synthesis corpus
+is a smaller controlled suite for checking stochastic synthesis behavior.
 
 ## Layout
 
 - `corpora/cobra.jsonl.gz`: compact source-text corpus generated from Trail of
   Bits CoBRA test datasets.
+- `corpora/realworld.jsonl.gz`: large corpus of real-world MBAs mined from
+  production obfuscated software.
 - `corpora/synthesis.jsonl.gz`: small hand-written stochastic synthesis corpus
   for checking synthesizer behavior.
+
+## Real-World Corpus
+
+Path:
+
+```text
+datasets/corpora/realworld.jsonl.gz
+```
+
+Format:
+
+```json
+{
+  "id": "case_000000",
+  "source": "game",
+  "expr_miasm": "ExprOp('-', ExprOp('<<', ExprId('x0', size=32), ExprInt(0x2, 32)), ExprInt(0x1, 32))",
+  "size": 32
+}
+```
+
+Unlike the CoBRA corpus (infix `expr_text`), this corpus stores each expression as a
+**Miasm IR repr** in `expr_miasm`, read back via `eval`
+(`msynth.parsing.parse_expr`). The IR encoding is required because real-world MBAs
+use slices, `ExprCompose`, zero/sign-extension and multi-size memory that the infix
+grammar cannot represent. There is no ground-truth (`expected_*`) field: these
+are obfuscated expressions with no known canonical simplification, so the corpus
+runner scores them by node-count reduction only.
+
+### Provenance
+
+Real-world MBA expressions mined from production obfuscated / protected software
+(commercial copy protection, VM-based obfuscators, and anti-cheat engines) via
+symbolic execution over their virtualized handlers. Each expression is normalized:
+every terminal (registers and memory accesses, with memory treated as one opaque
+variable) is unified to `x0, x1, …` in first-appearance order and no simplification is applied 
+to preserve the obfuscated shape. Structurally identical normalized expressions are deduplicated.
+The `source` field is generalized to one of:
+
+- `game` — expressions from protected games,
+- `anticheat` — expressions from anti-cheat engines,
+- `other` — expressions from other obfuscated binaries.
+
+The corpus currently contains 362,991 rows (`game` 361,145, `anticheat` 1,175,
+`other` 671).
+
+Read it with `gzip.open(..., "rt")`. Evaluate it with the same runner as the CoBRA
+corpus — it auto-detects the IR encoding:
+
+```bash
+python3 scripts/run_simplification_corpus.py \
+  --corpus datasets/corpora/realworld.jsonl.gz \
+  --oracle oracle.pickle \
+  --mode AST \
+  --limit 0 \
+  [--sources game]
+```
 
 ## CoBRA Corpus
 

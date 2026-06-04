@@ -18,7 +18,11 @@ if str(REPO_ROOT) not in sys.path:
 from miasm.expression.expression import Expr  # noqa: E402
 from miasm.expression.simplifications import expr_simp  # noqa: E402
 
-from msynth.parsing import parse_infix_expr  # noqa: E402
+from msynth.parsing import (  # noqa: E402
+    corpus_expr_field,
+    detect_corpus_encoding,
+    parse_corpus_expression,
+)
 from msynth.simplification.pipeline import PipelineMode  # noqa: E402
 from msynth.simplification.simplifier import Simplifier  # noqa: E402
 from msynth.utils.expr_utils import get_subexpressions  # noqa: E402
@@ -34,20 +38,25 @@ _SIMPLIFIER: Simplifier | None = None
 class CorpusRecord:
     id: str
     source: str
-    suite: str
-    expr_text: str
-    expected_text: str
+    suite: str               # "" when the row carries no suite (e.g. generalized dataset)
     size: int
+    encoding: str            # "ir" | "infix"
+    expr_str: str            # expr_miasm/expr_repr (ir) or expr_text (infix)
+    expected_str: str | None  # expected expression in the same encoding, or None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "CorpusRecord":
+        encoding = detect_corpus_encoding(data)
+        expr_str = corpus_expr_field(data)            # required (detect_* guaranteed it)
+        expected_str = corpus_expr_field(data, expected=True)  # optional -> None
         return cls(
             id=str(data["id"]),
             source=str(data["source"]),
-            suite=str(data["suite"]),
-            expr_text=str(data["expr_text"]),
-            expected_text=str(data["expected_text"]),
+            suite=str(data.get("suite", "")),
             size=int(data["size"]),
+            encoding=encoding,
+            expr_str=str(expr_str),
+            expected_str=expected_str,
         )
 
 
@@ -91,7 +100,11 @@ def non_negative_int(value: str) -> int:
 
 
 def load_corpus(
-    path: Path, *, limit: int, suites: set[str] | None = None
+    path: Path,
+    *,
+    limit: int,
+    suites: set[str] | None = None,
+    sources: set[str] | None = None,
 ) -> list[CorpusRecord]:
     records: list[CorpusRecord] = []
     seen_ids: set[str] = set()
@@ -113,6 +126,10 @@ def load_corpus(
             # ``suite`` field is in the allow-set. Used to isolate the GAMBA
             # vs SimBA halves of the corpus from the long-tail suites.
             if suites and record.suite not in suites:
+                continue
+            # Source filter: analogous, on the ``source`` field (e.g. the
+            # generalized real-world dataset's game / anticheat / other).
+            if sources and record.source not in sources:
                 continue
             records.append(record)
             # ``limit=0`` means "no cap" — load the entire corpus. Any positive
@@ -159,8 +176,18 @@ def check_record(record: CorpusRecord) -> CheckResult:
     original_nodes = None
     simplified_nodes = None
     try:
-        expression = parse_infix_expr(record.expr_text, size=record.size)
-        expected = parse_infix_expr(record.expected_text, size=record.size)
+        expression = parse_corpus_expression(
+            record.expr_str, encoding=record.encoding, size=record.size
+        )
+        # Ground truth is optional: datasets without an expected expression
+        # (e.g. the real-world IR dataset) are scored purely by node reduction.
+        expected = (
+            parse_corpus_expression(
+                record.expected_str, encoding=record.encoding, size=record.size
+            )
+            if record.expected_str is not None
+            else None
+        )
         original_nodes = node_count(expression)
         try:
             simplified = _SIMPLIFIER.simplify(expression)
@@ -172,7 +199,7 @@ def check_record(record: CorpusRecord) -> CheckResult:
             simplified_text = str(simplified)
             simplified_repr = repr(simplified)
             simplified_nodes = node_count(simplified)
-            if expr_simp(simplified) == expr_simp(expected):
+            if expected is not None and expr_simp(simplified) == expr_simp(expected):
                 status = "ground_truth"
                 detail = f"ground truth reached: nodes {original_nodes} -> {simplified_nodes}"
             elif simplified_nodes < original_nodes:
@@ -192,8 +219,8 @@ def check_record(record: CorpusRecord) -> CheckResult:
         source=record.source,
         status=status,
         detail=detail,
-        expr_text=record.expr_text,
-        expected_text=record.expected_text,
+        expr_text=record.expr_str,
+        expected_text=(record.expected_str or ""),
         simplified_text=simplified_text,
         simplified_repr=simplified_repr,
         original_nodes=original_nodes,
@@ -357,6 +384,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--sources",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated list of corpus sources to include (e.g. "
+            "'game,anticheat'). When set, rows whose ``source`` field is not in "
+            "the list are skipped. Useful for the generalized real-world dataset."
+        ),
+    )
+    parser.add_argument(
         "--jobs",
         type=positive_int,
         default=DEFAULT_JOBS,
@@ -418,7 +455,12 @@ def main() -> int:
     suites_filter: set[str] | None = None
     if args.suites:
         suites_filter = {s.strip() for s in args.suites.split(",") if s.strip()}
-    records = load_corpus(args.corpus, limit=args.limit, suites=suites_filter)
+    sources_filter: set[str] | None = None
+    if args.sources:
+        sources_filter = {s.strip() for s in args.sources.split(",") if s.strip()}
+    records = load_corpus(
+        args.corpus, limit=args.limit, suites=suites_filter, sources=sources_filter
+    )
     start = time.time()
     results = run_checks(
         records,
