@@ -419,8 +419,6 @@ def nonlinear_leaves(expr: Expr) -> List[Expr]:
     return found
 
 
-
-
 # ---------------------------------------------------------------------------
 # Layer 2 — §5.1 substitution loop (replaces the BFS-loop subtree-SimBA tier)
 # ---------------------------------------------------------------------------

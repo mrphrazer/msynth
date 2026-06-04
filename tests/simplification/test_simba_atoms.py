@@ -630,13 +630,13 @@ def test_simba_bitwise_refine_is_sound() -> None:
     y = ExprId("y", 8)
     z = ExprId("z", 8)
     battery = [
-        ~(~x),                                  # double negation
-        (x & x) + y,                            # idempotence inside a sum
-        (x & y) | (x & (~y)),                   # complement pair -> x
-        x | (~x),                               # redundancy -> all-ones
-        (x ^ y) + ExprInt(2, 8) * (x & y),      # linear-MBA identity (== x + y)
+        ~(~x),  # double negation
+        (x & x) + y,  # idempotence inside a sum
+        (x & y) | (x & (~y)),  # complement pair -> x
+        x | (~x),  # redundancy -> all-ones
+        (x ^ y) + ExprInt(2, 8) * (x & y),  # linear-MBA identity (== x + y)
         ExprInt(5, 8) * ((x & y) + (x | y)) + ExprInt(3, 8),  # affine combination
-        x + y + z,                              # three-atom mix
+        x + y + z,  # three-atom mix
     ]
     for expr in battery:
         assert _z3_equivalent(expr, _bitwise_refine(expr)), expr
@@ -659,9 +659,9 @@ def test_simba_run_equivalent_after_refine_on_mba_identities() -> None:
     x = ExprId("x", 16)
     y = ExprId("y", 16)
     battery = [
-        (x ^ y) + ExprInt(2, 16) * (x & y),     # == x + y
-        (x | y) + (x & y),                       # == x + y
-        (x | y) - (x & y),                       # == x ^ y
+        (x ^ y) + ExprInt(2, 16) * (x & y),  # == x + y
+        (x | y) + (x & y),  # == x + y
+        (x | y) - (x & y),  # == x ^ y
     ]
     for expr in battery:
         assert _z3_equivalent(expr, SimbaPass().run(expr)), expr

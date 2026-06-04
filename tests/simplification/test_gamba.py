@@ -1139,10 +1139,10 @@ def test_classifiers_agree_nonlinear_on_core_shapes(expr: Expr) -> None:
     _CORE_LINEAR
     + _CORE_NONLINEAR
     + [
-        (_X & _Y) & _Z,        # nested bitwise: GAMBA coarse-nonlinear, SimBA linear
-        (_X + _Y) & _Z,        # both nonlinear
-        _C * (_X + _Y),        # both linear
-        (_X & _Y) + _Z,        # both linear
+        (_X & _Y) & _Z,  # nested bitwise: GAMBA coarse-nonlinear, SimBA linear
+        (_X + _Y) & _Z,  # both nonlinear
+        _C * (_X + _Y),  # both linear
+        (_X & _Y) + _Z,  # both linear
         ExprOp("*", _X, _Y) + _Z,  # contains a rejected product
     ],
     ids=lambda e: str(e)[:24],

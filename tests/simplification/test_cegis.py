@@ -88,7 +88,9 @@ def test_cegis_recovers_constant_oracle_cannot() -> None:
     unified = expr.replace_expr(unification_dict)
 
     candidate = solver.try_synthesize(expr, unified, unification_dict)
-    assert candidate is not None  # CEGIS synthesised a candidate (equivalence checked below)
+    assert (
+        candidate is not None
+    )  # CEGIS synthesised a candidate (equivalence checked below)
     # independent (exhaustive) confirmation of the recovered constants
     assert _exhaustively_equivalent(candidate, expr, [v0])
 
@@ -111,7 +113,9 @@ def test_cegis_solves_two_variable_template() -> None:
     unified = expr.replace_expr(unification_dict)
 
     candidate = solver.try_synthesize(expr, unified, unification_dict)
-    assert candidate is not None  # CEGIS synthesised a candidate (equivalence checked below)
+    assert (
+        candidate is not None
+    )  # CEGIS synthesised a candidate (equivalence checked below)
     assert _semantically_equivalent(candidate, expr, [v0, v1], seed=2)
 
 

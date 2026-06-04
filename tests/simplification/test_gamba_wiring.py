@@ -364,8 +364,12 @@ def test_gamba_substitution_escalation_end_to_end_unlocks_nonlinear_atom() -> No
     p = ExprOp("*", x, y)
     expr = ExprOp("+", ExprOp("^", p, z), ExprOp("*", ExprInt(2, 8), ExprOp("&", p, z)))
 
-    out0 = Simplifier(pipeline_mode=PipelineMode.GAMBA, gamba_substitution_max_k=0).simplify(expr)
-    out2 = Simplifier(pipeline_mode=PipelineMode.GAMBA, gamba_substitution_max_k=2).simplify(expr)
+    out0 = Simplifier(
+        pipeline_mode=PipelineMode.GAMBA, gamba_substitution_max_k=0
+    ).simplify(expr)
+    out2 = Simplifier(
+        pipeline_mode=PipelineMode.GAMBA, gamba_substitution_max_k=2
+    ).simplify(expr)
 
     # Both must stay sound.
     assert _z3_equivalent(expr, out0)
@@ -387,5 +391,7 @@ def test_gamba_substitution_escalation_end_to_end_is_sound_when_no_reduction() -
     y = ExprId("y", 8)
     expr = ExprOp("+", ExprOp("*", x, y), x)  # a*x*y-style residue, no MBA collapse
 
-    out = Simplifier(pipeline_mode=PipelineMode.GAMBA, gamba_substitution_max_k=3).simplify(expr)
+    out = Simplifier(
+        pipeline_mode=PipelineMode.GAMBA, gamba_substitution_max_k=3
+    ).simplify(expr)
     assert _z3_equivalent(expr, out)

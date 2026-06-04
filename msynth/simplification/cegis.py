@@ -590,9 +590,7 @@ class CegisSolver:
         ]
         inputs = base[: min(len(base), count)]
         while len(inputs) < count:
-            inputs.append(
-                [self._rng.getrandbits(size) & mask for _ in range(num_vars)]
-            )
+            inputs.append([self._rng.getrandbits(size) & mask for _ in range(num_vars)])
         return inputs
 
     def _validate_candidate(
