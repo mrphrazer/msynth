@@ -257,8 +257,16 @@ def test_run_simplification_corpus_script_accepts_ir_format(tmp_path: Path) -> N
     corpus = write_corpus(tmp_path, [ir_record()])
 
     result = run_script(
-        "--corpus", str(corpus), "--oracle", str(oracle),
-        "--limit", "1", "--jobs", "1", "--mode", "AST",
+        "--corpus",
+        str(corpus),
+        "--oracle",
+        str(oracle),
+        "--limit",
+        "1",
+        "--jobs",
+        "1",
+        "--mode",
+        "AST",
     )
 
     assert result.returncode == 0, result.stderr
@@ -269,7 +277,9 @@ def test_run_simplification_corpus_script_accepts_ir_format(tmp_path: Path) -> N
     assert result.stderr == ""
 
 
-def test_run_simplification_corpus_script_ir_format_with_expected(tmp_path: Path) -> None:
+def test_run_simplification_corpus_script_ir_format_with_expected(
+    tmp_path: Path,
+) -> None:
     # IR-encoded row WITH an expected_miasm ground truth -> ground_truth status.
     oracle = write_min_oracle(tmp_path)
     corpus = write_corpus(
@@ -278,8 +288,16 @@ def test_run_simplification_corpus_script_ir_format_with_expected(tmp_path: Path
     )
 
     result = run_script(
-        "--corpus", str(corpus), "--oracle", str(oracle),
-        "--limit", "1", "--jobs", "1", "--mode", "AST",
+        "--corpus",
+        str(corpus),
+        "--oracle",
+        str(oracle),
+        "--limit",
+        "1",
+        "--jobs",
+        "1",
+        "--mode",
+        "AST",
     )
 
     assert result.returncode == 0, result.stderr
@@ -299,8 +317,18 @@ def test_run_simplification_corpus_script_sources_filter(tmp_path: Path) -> None
     )
 
     result = run_script(
-        "--corpus", str(corpus), "--oracle", str(oracle),
-        "--limit", "0", "--jobs", "1", "--mode", "AST", "--sources", "game",
+        "--corpus",
+        str(corpus),
+        "--oracle",
+        str(oracle),
+        "--limit",
+        "0",
+        "--jobs",
+        "1",
+        "--mode",
+        "AST",
+        "--sources",
+        "game",
     )
 
     assert result.returncode == 0, result.stderr

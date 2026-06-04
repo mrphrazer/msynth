@@ -38,16 +38,16 @@ _SIMPLIFIER: Simplifier | None = None
 class CorpusRecord:
     id: str
     source: str
-    suite: str               # "" when the row carries no suite (e.g. generalized dataset)
+    suite: str  # "" when the row carries no suite (e.g. generalized dataset)
     size: int
-    encoding: str            # "ir" | "infix"
-    expr_str: str            # expr_miasm/expr_repr (ir) or expr_text (infix)
+    encoding: str  # "ir" | "infix"
+    expr_str: str  # expr_miasm/expr_repr (ir) or expr_text (infix)
     expected_str: str | None  # expected expression in the same encoding, or None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "CorpusRecord":
         encoding = detect_corpus_encoding(data)
-        expr_str = corpus_expr_field(data)            # required (detect_* guaranteed it)
+        expr_str = corpus_expr_field(data)  # required (detect_* guaranteed it)
         expected_str = corpus_expr_field(data, expected=True)  # optional -> None
         return cls(
             id=str(data["id"]),
