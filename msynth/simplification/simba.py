@@ -18,6 +18,7 @@ from itertools import combinations
 from miasm.expression.expression import (
     Expr,
     ExprCompose,
+    ExprCond,
     ExprId,
     ExprInt,
     ExprMem,
@@ -34,49 +35,466 @@ class _ExpressionKind(Enum):
     MIXED = "mixed"
 
 
+# Primary leaves: nodes that SiMBA always treats as opaque atoms because
+# they are syntactic dead-ends with no "interior" structure for the
+# linear-MBA classifier to descend through. ExprCond joins this set
+# under the atomisation extension (GAMBA Section 5.5) — its value on a
+# boolean cube assignment is deterministic and structurally identified,
+# so the same soundness sketch as ExprSlice/ExprCompose carries over.
+_PRIMARY_LEAVES = (ExprId, ExprMem, ExprSlice, ExprCompose, ExprCond)
+
+
+def _expr_node_count(expr: Expr) -> int:
+    """
+    Cheap structural size of an :class:`Expr`. Used as the net-shrink guard
+    for :func:`_bitwise_refine`, which only accepts a refined output when it
+    has strictly fewer nodes than the input.
+    """
+    try:
+        return len(expr.graph().nodes())
+    except Exception:
+        # ``Expr.graph()`` can fail on degenerate inputs (e.g. a bare leaf);
+        # fall back to a conservative size of 1 — the refine guard then
+        # rejects anything that isn't a strict improvement.
+        return 1
+
+
+def _bitwise_refine(expr: Expr) -> Expr:
+    """
+    Algebraic polish on the fully-assembled SimBA reconstruction.
+
+    Reuses msynth's GAMBA §5.2 no-grow preprocessor (idempotence, De Morgan,
+    absorption, redundancy, complement-pair, XOR-collapses, …) to refine the
+    final SimBA output. Corresponds in spirit to upstream GAMBA's
+    ``BitwiseFactory.refine`` (XOR-insertion · negation-flipping · common-
+    factor extraction) — the no-grow §5.2 rules cover the negation-flip and
+    XOR-collapse cases. Only ``GAMBA_PREPROCESSOR``'s ``guarded=False`` rules
+    run: the guarded ``ring_normalize`` / ``factor_common_subterm`` rules are
+    deliberately excluded so this stays a pure no-grow polish (those broader
+    rewrites are the post-rewriter's job in GAMBA mode).
+
+    Called once on the complete reconstruction at the end of
+    :meth:`_SimbaSimplifier.simplify` — NOT per Quine-McCluskey region. Applying
+    it per region perturbs SimBA's multi-coefficient assembly (the open issue
+    that previously kept it disabled); applying it once to the assembled output
+    operates on the whole coefficient-bearing expression and is sound. Each
+    constituent rule is individually Z3-verified in
+    ``tests/simplification/test_rewrites.py``, and the end-to-end soundness of
+    this call is gated by ``test_simba_bitwise_refine_is_sound`` /
+    ``test_simba_atoms``.
+
+    The preprocessor is no-grow by construction; the net-shrink guard below is
+    belt-and-braces against the rare case where bottom-up normalisation rebuilds
+    equal-size nodes differently.
+
+    Args:
+        expr: The assembled SimBA reconstruction (any Expr).
+
+    Returns:
+        The refined expression when it has strictly fewer nodes than
+        ``expr``; otherwise ``expr`` unchanged.
+    """
+    # Lazy import to avoid a top-of-module circular concern — ``simba`` is
+    # imported by ``pipeline``, and ``gamba`` is also imported by
+    # ``pipeline``; nothing in ``gamba`` depends on ``simba``, so the lazy
+    # import is purely defensive (the dependency graph is currently acyclic
+    # but a future change could break that quietly).
+    from msynth.simplification.gamba import GAMBA_PREPROCESSOR
+
+    refined = GAMBA_PREPROCESSOR.normalize(expr)
+    if _expr_node_count(refined) < _expr_node_count(expr):
+        return refined
+    return expr
+
+
+def _apply_op_rule(
+    op: str, args: tuple, arg_kinds: list, parent_size: int
+) -> _ExpressionKind | None:
+    """
+    Per-op linear-MBA classification rule.
+
+    Given an ExprOp's operator string, args, and the classified kinds
+    of those args, return the kind of the whole op — or ``None`` if no
+    rule in the linear-MBA fragment matches this operand-kind
+    combination. The caller (:func:`_classify_uncached`) treats a
+    ``None`` here as a whole-expression no-op signal (``(None, True)``),
+    NOT as an instruction to atomise the node — operand-kind rejections
+    are deliberately left unsimplified rather than turned into atoms.
+    """
+    mask = (1 << parent_size) - 1
+
+    if op == "-" and len(args) == 1:
+        return (
+            _ExpressionKind.ARITHMETIC
+            if arg_kinds[0] is _ExpressionKind.ARITHMETIC
+            else _ExpressionKind.MIXED
+        )
+
+    if op in {"+", "-"} and len(args) >= 2:
+        return (
+            _ExpressionKind.ARITHMETIC
+            if all(k is _ExpressionKind.ARITHMETIC for k in arg_kinds)
+            else _ExpressionKind.MIXED
+        )
+
+    if op == "*" and len(args) >= 2:
+        # Linear MBA terms can be multiplied by arithmetic constants, but a
+        # product of two variable-dependent bitwise/mixed expressions would
+        # be polynomial/nonlinear. The caller atomises that case.
+        non_arithmetic = sum(k is not _ExpressionKind.ARITHMETIC for k in arg_kinds)
+        if non_arithmetic > 1:
+            return None
+        return (
+            _ExpressionKind.ARITHMETIC if non_arithmetic == 0 else _ExpressionKind.MIXED
+        )
+
+    if op in {"&", "|"} and len(args) >= 2:
+        if all(k is _ExpressionKind.ARITHMETIC for k in arg_kinds):
+            return _ExpressionKind.ARITHMETIC
+        if all(k is _ExpressionKind.BITWISE for k in arg_kinds):
+            return _ExpressionKind.BITWISE
+        return None
+
+    if op == "^" and len(args) >= 2:
+        # XOR sits inside the linear-MBA fragment only under tight
+        # conditions. The cube reconstruction extrapolates from
+        # boolean-cube samples to all bit-vector inputs assuming the
+        # underlying function is a linear MBA; classifying outside
+        # that fragment produces rewrites that agree on {0,1}^n and
+        # diverge elsewhere.
+        #
+        # Valid shapes (each preserves linear-MBA-ness):
+        #   - all operands BITWISE  (possibly with all-ones constants
+        #     standing in for bitwise NOT)               -> BITWISE
+        #   - exactly one MIXED operand, the rest all-ones constants
+        #     (this is ``~MIXED`` = ``-MIXED - 1``)      -> MIXED
+        #   - all operands ARITHMETIC constants
+        #     (XOR of constants is itself a constant)    -> ARITHMETIC
+        # Everything else is non-linear in the operands and is left
+        # to the caller to atomise.
+        bitwise_count = 0
+        mixed_count = 0
+        allones_count = 0
+        non_allones_arith_count = 0
+        for arg, kind in zip(args, arg_kinds):
+            if kind is _ExpressionKind.BITWISE:
+                bitwise_count += 1
+            elif kind is _ExpressionKind.MIXED:
+                mixed_count += 1
+            else:
+                if isinstance(arg, ExprInt) and int(arg) == mask:
+                    allones_count += 1
+                else:
+                    non_allones_arith_count += 1
+
+        if bitwise_count == 0 and mixed_count == 0:
+            return _ExpressionKind.ARITHMETIC
+        if non_allones_arith_count > 0:
+            return None
+        if bitwise_count > 0 and mixed_count > 0:
+            return None
+        if mixed_count == 0:
+            return _ExpressionKind.BITWISE
+        if mixed_count == 1:
+            return _ExpressionKind.MIXED
+        return None
+
+    return None
+
+
+def _classify(
+    expr: Expr,
+    parent_size: int,
+    cache: dict[Expr, tuple[_ExpressionKind | None, bool]] | None = None,
+) -> tuple[_ExpressionKind | None, bool]:
+    """
+    Atomisation-aware classifier for SiMBA.
+
+    Returns ``(kind, is_atom)`` where ``kind`` is the linear-MBA kind
+    (ARITHMETIC, BITWISE, or MIXED) the surrounding cube reasoning sees
+    for this node, and ``is_atom`` records whether SiMBA treats the
+    node as opaque (i.e. looks it up in the cube ``env`` rather than
+    recursing into its structure).
+
+    The atomisation extension (GAMBA Section 5.5) generalises the
+    Slice/Compose/Mem leaves to every node whose *operator* is outside
+    the linear-MBA fragment (the fast path in
+    :func:`_classify_uncached`): such a node is returned as a BITWISE
+    atom. Soundness rests on three properties that hold for every miasm
+    pure-function node:
+
+    1. Determinism per cube assignment — when the inner atoms take
+       fixed integer values, the node takes a deterministic integer
+       value.
+    2. Structural dedup — two textually equal occurrences map to the
+       same atom via miasm's ``Expr.__hash__`` / ``__eq__``.
+    3. Width match — checked here via ``expr.size != parent_size``,
+       so ``env[node]`` and the cube modulus align.
+
+    Note the distinction from an *operand-kind* rejection: when the
+    operator IS in the fragment but its operand kinds don't match any
+    rule, the classifier does NOT atomise — it returns the no-op signal
+    ``(None, True)`` instead (see :func:`_classify_uncached`).
+
+    ``(None, True)`` (the no-op short-circuit signal used by callers) is
+    returned in three cases: a fundamental width mismatch, an operand-kind
+    rejection, and propagation of either from a child argument. It is NOT
+    limited to width mismatches.
+    """
+    if cache is None:
+        cache = {}
+    cached = cache.get(expr)
+    if cached is not None:
+        return cached
+
+    result = _classify_uncached(expr, parent_size, cache)
+    cache[expr] = result
+    return result
+
+
+def _classify_uncached(
+    expr: Expr,
+    parent_size: int,
+    cache: dict[Expr, tuple[_ExpressionKind | None, bool]],
+) -> tuple[_ExpressionKind | None, bool]:
+    if expr.size != parent_size:
+        return (None, True)
+    if isinstance(expr, ExprInt):
+        return (_ExpressionKind.ARITHMETIC, False)
+    if isinstance(expr, _PRIMARY_LEAVES):
+        return (_ExpressionKind.BITWISE, True)
+    if not isinstance(expr, ExprOp):
+        # Any other node kind (future miasm IL extensions) is treated
+        # as an opaque BITWISE atom. Soundness is the same as for the
+        # primary leaves above.
+        return (_ExpressionKind.BITWISE, True)
+
+    # Fast path: if the op string is outside the linear-MBA fragment,
+    # atomise the whole node without recursing into its args. This
+    # both saves work and avoids spurious None-propagation when an op
+    # like ``<<`` has args whose width differs from the op result —
+    # the cube reasoning doesn't look inside, so the inner widths are
+    # irrelevant.
+    if expr.op not in {"+", "-", "*", "&", "|", "^"}:
+        return (_ExpressionKind.BITWISE, True)
+
+    arg_results = [_classify(arg, parent_size, cache) for arg in expr.args]
+    if any(k is None for k, _ in arg_results):
+        # An arg has a fundamental width mismatch or an unrecoverable
+        # operand-kind rejection deeper inside — propagate the no-op
+        # signal. (See the "operand-kind rejection" note below for
+        # why we keep this strict.)
+        return (None, True)
+    arg_kinds = [k for k, _ in arg_results]
+
+    op_kind = _apply_op_rule(expr.op, expr.args, arg_kinds, parent_size)
+    if op_kind is None:
+        # Operand-kind rejection: the op IS in {+, -, *, &, |, ^} but
+        # this particular operand-kind combination (e.g. ``&`` over
+        # one BITWISE and one MIXED arg) doesn't match any linear-MBA
+        # rule. We deliberately DO NOT atomise here.
+        #
+        # GAMBA 5.5's "substitution of nonlinear subexpressions" is
+        # about replacing whole non-linear *operators* (shifts, cond,
+        # division, etc.) with opaque atoms; that's handled by the
+        # fast path above. Atomising operand-kind rejections is a
+        # different beast — it widens SiMBA's atom set whenever a
+        # linear-MBA-shaped op happens to mix kinds at depth, which
+        # in practice triggers verbose reconstructions over many
+        # atoms whose downstream the surrounding pipeline cannot
+        # fold back together (the demo MBA regression).
+        #
+        # Returning ``None`` here keeps SiMBA's preprocessor pass a
+        # no-op on those shapes, matching pre-extension behaviour.
+        return (None, True)
+    return (op_kind, False)
+
+
 def _collect_atoms(expr: Expr) -> list[Expr]:
     """
     Collect the leaf expressions SiMBA treats as boolean-cube atoms.
 
-    Atoms are ``ExprId`` (registers, named variables), ``ExprMem``
-    (memory loads), ``ExprSlice`` (bit-field extracts), and
-    ``ExprCompose`` (bit-field concatenations). The walk stops at each
-    of these — they are the atom; SiMBA does not descend into a memory
-    load's pointer, a slice's argument, or a compose's pieces.
+    Under the atomisation extension (GAMBA Section 5.5), an atom is
+    any node where :func:`_classify` reports ``is_atom=True`` — either
+    a primary leaf (``ExprId``, ``ExprMem``, ``ExprSlice``,
+    ``ExprCompose``, ``ExprCond``) or any subtree whose op + arg-kinds
+    don't match a linear-MBA rule. The walker stops descending at
+    those points and adds the whole subtree as a single atom.
 
-    Slice and Compose are atomised rather than recursed-into because the
-    linear-MBA theorem (Reichenwallner & Meerwald-Stadler, 2022) only
-    requires that an atom be substitutable with a concrete value on
-    each boolean assignment. Treating a width-crossing node opaquely is
-    sound: the cube evaluator never reasons about the bits inside, so
-    the per-bit independence the proof relies on is preserved at the
-    surrounding (linear-MBA) level. Correlations between e.g.
-    ``X[0:8]`` and ``X[8:16]`` survive because the reconstruction is
-    correct on the full cube and the reachable subset is a subset of
-    that cube.
-
-    Structural identity matters: two textually equal slice or compose
-    nodes must dedupe to one atom, or ``e ^ e`` would not collapse to
-    zero. Miasm's ``Expr.__hash__`` / ``__eq__`` are structural, which
-    makes the ``set`` here do the right thing.
+    Structural identity matters: two textually equal subtrees must
+    dedupe to one atom, or ``e ^ e`` would not collapse to zero.
+    Miasm's ``Expr.__hash__`` / ``__eq__`` are structural, which makes
+    the ``set`` here do the right thing for nested ExprOps as well as
+    for the primary leaves.
     """
+    parent_size = expr.size
+    cache: dict[Expr, tuple[_ExpressionKind | None, bool]] = {}
     atoms: set[Expr] = set()
 
     def walk(node: Expr) -> None:
-        if isinstance(node, (ExprId, ExprMem, ExprSlice, ExprCompose)):
-            atoms.add(node)
+        kind, is_atom = _classify(node, parent_size, cache)
+        if kind is None:
+            # No-op signal (width mismatch or operand-kind rejection):
+            # the node is outside the fragment and is not atomised.
             return
         if isinstance(node, ExprInt):
             return
+        if is_atom:
+            atoms.add(node)
+            return
+        # Decomposable: recurse into args.
         if isinstance(node, ExprOp):
             for arg in node.args:
                 walk(arg)
-            return
-        # ExprCond stays unsupported: conditional select isn't a linear
-        # MBA leaf, and the classifier will reject the parent anyway.
 
     walk(expr)
     return sorted(atoms, key=lambda x: str(x))
+
+
+# ---------------------------------------------------------------------------
+# Quine-McCluskey boolean minimisation
+# ---------------------------------------------------------------------------
+#
+# Used by ``_SimbaSimplifier._lookup_bitwise_expression`` to turn a truth
+# table into a minimal sum-of-products. Output is a list of (value, mask)
+# tuples where bits in ``mask`` are don't-cares and the remaining bits in
+# ``value`` are the required literal values. Round-trips through
+# ``_build_qm_bitwise`` to a bitwise miasm expression.
+
+
+def _qm_minimise(table: int, n_vars: int) -> list[tuple[int, int]]:
+    """
+    Quine-McCluskey minimisation of a boolean truth table.
+
+    ``table`` packs row i of the function in bit i (matching
+    ``_SimbaSimplifier._table_to_int``). ``n_vars`` is the variable
+    count, so the table has ``2 ** n_vars`` rows. Returns a list of
+    prime implicants chosen by an essential-implicant + greedy cover
+    of the original minterms.
+
+    Edge cases:
+      - ``table == 0`` -> ``[]`` (the function is constant 0).
+      - all-1s -> ``[(0, full_mask)]`` (single don't-care-everything term,
+        meaning constant 1).
+    """
+    if table == 0:
+        return []
+    full_mask = (1 << n_vars) - 1
+    rows = 1 << n_vars
+    if table == (1 << rows) - 1:
+        return [(0, full_mask)]
+
+    # Collect minterms (rows where the function is 1).
+    minterms = [row for row in range(rows) if (table >> row) & 1]
+
+    # Group implicants by popcount of the "value" (don't-care bits excluded).
+    # Each implicant is (value, mask). Iteratively combine pairs that
+    # differ in exactly one literal; the combined implicant gains a
+    # don't-care bit. Implicants that participate in a combination are
+    # marked, and the unmarked ones at every round are prime implicants.
+    current: set[tuple[int, int]] = {(m, 0) for m in minterms}
+    primes: set[tuple[int, int]] = set()
+
+    while current:
+        # Bucket by mask so we only attempt to combine same-shape implicants
+        # (different-shape pairs can't differ in exactly one literal).
+        by_mask: dict[int, list[tuple[int, int]]] = {}
+        for value, mask in current:
+            by_mask.setdefault(mask, []).append((value, mask))
+
+        used: set[tuple[int, int]] = set()
+        next_round: set[tuple[int, int]] = set()
+        for mask, items in by_mask.items():
+            # Within a single mask group, bucket further by popcount of
+            # the literal bits so a pair that differs in one bit lies
+            # exactly between adjacent groups.
+            by_popcount: dict[int, list[tuple[int, int]]] = {}
+            for value, m in items:
+                literal_bits = value & ~mask
+                by_popcount.setdefault(bin(literal_bits).count("1"), []).append(
+                    (value, m)
+                )
+            popcounts = sorted(by_popcount.keys())
+            for pc in popcounts:
+                if pc + 1 not in by_popcount:
+                    continue
+                for value_a, mask_a in by_popcount[pc]:
+                    for value_b, mask_b in by_popcount[pc + 1]:
+                        diff = (value_a ^ value_b) & ~mask
+                        if diff and (diff & (diff - 1)) == 0:
+                            combined_mask = mask | diff
+                            combined_value = value_a & ~combined_mask
+                            next_round.add((combined_value, combined_mask))
+                            used.add((value_a, mask_a))
+                            used.add((value_b, mask_b))
+
+        # Anything not combined this round is a prime implicant.
+        for item in current:
+            if item not in used:
+                primes.add(item)
+        current = next_round
+
+    prime_list = sorted(primes)
+
+    # Cover step: select essential primes first, then greedily cover the
+    # rest. ``covers[p]`` is the set of original minterms covered by p.
+    def implicant_covers(value: int, mask: int) -> set[int]:
+        # Enumerate every assignment of the don't-care bits.
+        dc_bits = [b for b in range(n_vars) if (mask >> b) & 1]
+        covered: set[int] = set()
+        for combo in range(1 << len(dc_bits)):
+            cv = value
+            for i, b in enumerate(dc_bits):
+                if (combo >> i) & 1:
+                    cv |= 1 << b
+                else:
+                    cv &= ~(1 << b)
+            covered.add(cv)
+        return covered
+
+    covers = {p: implicant_covers(*p) for p in prime_list}
+    minterm_set = set(minterms)
+
+    # For each minterm, which primes cover it?
+    cover_map: dict[int, list[tuple[int, int]]] = {m: [] for m in minterm_set}
+    for p, mts in covers.items():
+        for mt in mts:
+            if mt in cover_map:
+                cover_map[mt].append(p)
+
+    chosen: set[tuple[int, int]] = set()
+    remaining = set(minterm_set)
+
+    # Essential prime implicants: those that are the unique cover of
+    # some minterm. Repeatedly extract them until none remain — picking
+    # one essential may leave others as essential by simplification.
+    while True:
+        new_essentials = {
+            cover_map[mt][0]
+            for mt in remaining
+            if len(cover_map[mt]) == 1 and cover_map[mt][0] not in chosen
+        }
+        if not new_essentials:
+            break
+        for p in new_essentials:
+            chosen.add(p)
+            remaining -= covers[p]
+        # Drop chosen primes from cover_map so further iterations see
+        # the reduced choice set.
+        for mt in list(remaining):
+            cover_map[mt] = [p for p in cover_map[mt] if p not in chosen]
+
+    # Greedy cover for whatever the essentials didn't pick up.
+    while remaining:
+        best = max(prime_list, key=lambda p: len(covers[p] & remaining))
+        if not (covers[best] & remaining):
+            # Should not happen if the prime set is complete, but bail
+            # gracefully rather than loop forever.
+            break
+        chosen.add(best)
+        remaining -= covers[best]
+
+    return sorted(chosen)
 
 
 @dataclass(frozen=True)
@@ -96,16 +514,19 @@ class _SimbaSimplifier:
         self.size = expr.size
         self.modulus = 1 << self.size
         self.mask = self.modulus - 1
+        self._classify_cache: dict[Expr, tuple[_ExpressionKind | None, bool]] = {}
         self.variables = _collect_atoms(expr)
 
     def simplify(self) -> Expr:
         if self.size <= 0:
             return self.expr
 
-        # SiMBA is only sound for linear MBAs. This pass is deliberately
-        # conservative: if the root expression is not in the supported linear
-        # fragment, preprocessing is a no-op and later simplification stages can
-        # still attempt their normal oracle-based handling.
+        # A None here is the classifier's no-op signal: either a width
+        # mismatch, or the top node is a linear-MBA operator whose operand
+        # kinds don't match any rule (operand-kind rejection). Operators
+        # outside the fragment instead atomise to a single opaque BITWISE
+        # atom, which SiMBA reconstructs unchanged. In every None case we
+        # leave the input alone.
         if self._classify(self.expr) is None:
             return self.expr
 
@@ -128,134 +549,37 @@ class _SimbaSimplifier:
             # for one, two, or three variables can produce a more compact result.
             simplified = self._simplify_fewer_variables(simplified)
 
-        return simplified
+        # Polish the FULLY-ASSEMBLED reconstruction with the §5.2 no-grow
+        # algebraic rules (see :func:`_bitwise_refine`). Applied here — after
+        # all coefficient/bitwise terms are combined — rather than per QM region,
+        # so the rewrite operates on the complete coefficient-bearing expression
+        # and cannot perturb SimBA's multi-coefficient assembly. Net-shrink
+        # guarded, so it only ever makes the output smaller. This keeps SimBA's
+        # standalone output compact in SIMBA mode and in subtree-SimBA, where no
+        # GAMBA post-rewriter runs after the pass.
+        return _bitwise_refine(simplified)
 
     def _classify(self, expr: Expr) -> _ExpressionKind | None:
         """
-        Return the linear-MBA kind of ``expr`` or None if unsupported.
+        Return the linear-MBA kind of ``expr`` or None (the no-op
+        signal) when ``expr`` is outside the cube model.
 
-        The checker mirrors upstream SiMBA's parser-level linearity rules, but
-        applies them to Miasm nodes. Arithmetic operations may combine mixed
-        terms linearly. Multiplication is allowed only when at most one operand
-        is non-arithmetic, which models "constant times bitwise expression".
-        Bitwise operators are allowed only over purely bitwise operands, except
-        for XOR with an all-ones constant, which is how msynth's infix parser
-        represents bitwise NOT.
+        Under the atomisation extension, None is returned for a size
+        mismatch with ``self.size`` OR for an operand-kind rejection (a
+        fragment operator whose operand kinds match no rule). Operators
+        outside the linear-MBA fragment — shifts, rotations, division,
+        multiplication of two non-arith operands, ExprCond — do NOT
+        return None: they classify as BITWISE because the cube reasoning
+        treats them as opaque atoms. See the module-level
+        :func:`_classify` for the soundness sketch.
         """
-        if expr.size != self.size:
-            return None
-        if isinstance(expr, ExprInt):
-            return _ExpressionKind.ARITHMETIC
-        if isinstance(expr, ExprId):
-            return _ExpressionKind.BITWISE
-        if isinstance(expr, (ExprMem, ExprSlice, ExprCompose)):
-            # Memory loads, slices, and compositions are opaque
-            # bit-vectors of fixed size. The linear-MBA cube argument
-            # does not require atoms to be registers — only that they
-            # have a value on each boolean assignment. Their interiors
-            # are intentionally not inspected; the whole node is the
-            # atom. See ``_collect_atoms`` for the soundness sketch.
-            return _ExpressionKind.BITWISE
-        if not isinstance(expr, ExprOp):
-            return None
+        kind, _ = _classify(expr, self.size, self._classify_cache)
+        return kind
 
-        kinds = [self._classify(arg) for arg in expr.args]
-        if any(kind is None for kind in kinds):
-            return None
-
-        if expr.op == "-" and len(expr.args) == 1:
-            return (
-                _ExpressionKind.ARITHMETIC
-                if kinds[0] is _ExpressionKind.ARITHMETIC
-                else _ExpressionKind.MIXED
-            )
-
-        if expr.op in {"+", "-"} and len(expr.args) >= 2:
-            return (
-                _ExpressionKind.ARITHMETIC
-                if all(kind is _ExpressionKind.ARITHMETIC for kind in kinds)
-                else _ExpressionKind.MIXED
-            )
-
-        if expr.op == "*" and len(expr.args) >= 2:
-            # Linear MBA terms can be multiplied by arithmetic constants, but a
-            # product of two variable-dependent bitwise/mixed expressions would
-            # be polynomial/nonlinear and is outside this pass.
-            non_arithmetic = sum(
-                kind is not _ExpressionKind.ARITHMETIC for kind in kinds
-            )
-            if non_arithmetic > 1:
-                return None
-            return (
-                _ExpressionKind.ARITHMETIC
-                if non_arithmetic == 0
-                else _ExpressionKind.MIXED
-            )
-
-        if expr.op in {"&", "|"} and len(expr.args) >= 2:
-            if all(kind is _ExpressionKind.ARITHMETIC for kind in kinds):
-                return _ExpressionKind.ARITHMETIC
-            if all(kind is _ExpressionKind.BITWISE for kind in kinds):
-                return _ExpressionKind.BITWISE
-            return None
-
-        if expr.op == "^" and len(expr.args) >= 2:
-            # XOR sits inside the linear-MBA fragment only under tight
-            # conditions. The cube reconstruction extrapolates from
-            # boolean-cube samples to all bit-vector inputs assuming the
-            # underlying function is a linear MBA; classifying outside
-            # that fragment produces rewrites that agree on {0,1}^n and
-            # diverge elsewhere.
-            #
-            # Valid shapes (each preserves linear-MBA-ness):
-            #   - all operands BITWISE  (possibly with all-ones constants
-            #     standing in for bitwise NOT)               -> BITWISE
-            #   - exactly one MIXED operand, the rest all-ones constants
-            #     (this is ``~MIXED`` = ``-MIXED - 1``)      -> MIXED
-            #   - all operands ARITHMETIC constants
-            #     (XOR of constants is itself a constant)    -> ARITHMETIC
-            # Everything else is non-linear in the operands and must be
-            # rejected — most importantly ``MIXED ^ MIXED`` and any mix
-            # of bitwise with non-all-ones arithmetic constants.
-            bitwise_count = 0
-            mixed_count = 0
-            allones_count = 0
-            non_allones_arith_count = 0
-            for arg, kind in zip(expr.args, kinds):
-                if kind is _ExpressionKind.BITWISE:
-                    bitwise_count += 1
-                elif kind is _ExpressionKind.MIXED:
-                    mixed_count += 1
-                else:  # ARITHMETIC
-                    if self._is_all_ones(arg):
-                        allones_count += 1
-                    else:
-                        non_allones_arith_count += 1
-
-            # Pure constant XOR — stays in the ARITHMETIC fragment.
-            if bitwise_count == 0 and mixed_count == 0:
-                return _ExpressionKind.ARITHMETIC
-
-            # Non-all-ones arithmetic constants only join with other
-            # arithmetic constants in the linear-MBA fragment.
-            if non_allones_arith_count > 0:
-                return None
-
-            # BITWISE and MIXED cannot mix under XOR.
-            if bitwise_count > 0 and mixed_count > 0:
-                return None
-
-            if mixed_count == 0:
-                return _ExpressionKind.BITWISE
-
-            # ``~MIXED`` is itself MIXED; two or more MIXED operands
-            # XOR'd together produce a non-linear function.
-            if mixed_count == 1:
-                return _ExpressionKind.MIXED
-
-            return None
-
-        return None
+    def _is_atom(self, expr: Expr) -> bool:
+        """True iff SiMBA treats ``expr`` as opaque on the cube."""
+        _, is_atom = _classify(expr, self.size, self._classify_cache)
+        return is_atom
 
     def _is_all_ones(self, expr: Expr) -> bool:
         return isinstance(expr, ExprInt) and int(expr) == self.mask
@@ -281,7 +605,9 @@ class _SimbaSimplifier:
         """Evaluate the supported linear-MBA fragment under one Boolean assignment."""
         if isinstance(expr, ExprInt):
             return int(expr) & self.mask
-        if isinstance(expr, (ExprId, ExprMem, ExprSlice, ExprCompose)):
+        if self._is_atom(expr):
+            # Primary leaf or atomised non-linear subtree — the cube
+            # treats it as an opaque variable and looks it up directly.
             return env[expr] & self.mask
         if not isinstance(expr, ExprOp):
             raise ValueError(f"unsupported expression {type(expr).__name__}")
@@ -575,7 +901,11 @@ class _SimbaSimplifier:
 
         Upstream SiMBA ships lookup tables for up to three variables. To avoid a
         bundled table, this implementation recognizes the common compact forms
-        directly and falls back to a DNF expression for remaining predicates.
+        directly, then uses Quine-McCluskey minimisation for the rest. A DNF
+        fallback follows QM, but QM already covers every table except the
+        all-ones table (for which DNF also returns None), so the DNF minterm
+        construction is effectively unreachable in practice; it is kept as a
+        defensive last resort. Returns None when no bitwise form is produced.
         """
         table = self._table_to_int(predicate)
         variable_tables = [
@@ -612,6 +942,21 @@ class _SimbaSimplifier:
                 if table == or_table:
                     return self._or(selected)
 
+        # Try Quine-McCluskey minimisation before falling back to DNF.
+        qm_terms = _qm_minimise(table, len(variables))
+        qm_expr = self._build_qm_bitwise(qm_terms, variables)
+        if qm_expr is not None:
+            # Return the per-region QM bitwise expression unrefined: algebraic
+            # polishing is applied once to the fully-assembled reconstruction at
+            # the end of :meth:`simplify` (via :func:`_bitwise_refine`), not per
+            # region — running the §5.2 rules per region perturbs SimBA's
+            # multi-coefficient assembly, whereas refining the complete output
+            # is sound (see the comment at the ``simplify`` return site).
+            return qm_expr
+        # Defensive last resort: DNF. In practice QM above succeeds for every
+        # table except the all-ones table, and for that table _dnf_expression
+        # also returns None (its row-0 minterm can't be built), so this call
+        # currently only ever returns None. Kept in case QM coverage changes.
         return self._dnf_expression(predicate, variables)
 
     def _dnf_expression(
@@ -620,9 +965,11 @@ class _SimbaSimplifier:
         """
         Build a disjunctive-normal-form predicate.
 
-        DNF is only a fallback for small truth tables. If the predicate includes
-        the all-zero row, building that minterm would require a constant true
-        expression; returning None lets the caller abandon that refinement.
+        DNF is only a defensive fallback (see :meth:`_lookup_bitwise_expression`:
+        Quine-McCluskey already covers every reachable table, so this is not
+        exercised in practice). If the predicate includes the all-zero row
+        (assignment 0 enabled), building that minterm would require a constant
+        true expression; returning None lets the caller abandon that refinement.
         """
         terms = []
         for assignment, enabled in enumerate(predicate):
@@ -657,6 +1004,37 @@ class _SimbaSimplifier:
             if value:
                 result |= 1 << index
         return result
+
+    def _build_qm_bitwise(
+        self, prime_implicants: list[tuple[int, int]], variables: list[Expr]
+    ) -> Expr | None:
+        """
+        Convert Quine-McCluskey prime implicants to a miasm bitwise expression.
+
+        Each implicant is (value, mask) where bits in ``mask`` are don't-cares
+        and bits in ``value`` outside the mask are the required literal values.
+        A fully-masked implicant (all literals don't-care) means constant 1,
+        which we cannot express in the bitwise basis — return None so the
+        caller can fall back to DNF (which also bails on the row-0=1 case).
+        """
+        if not prime_implicants:
+            return self._const(0)
+        full_mask = (1 << len(variables)) - 1
+        terms: list[Expr] = []
+        for value, mask in prime_implicants:
+            if mask == full_mask:
+                # constant 1 implicant — not expressible as a bitwise term.
+                return None
+            literals = []
+            for index in range(len(variables)):
+                if (mask >> index) & 1:
+                    continue
+                if (value >> index) & 1:
+                    literals.append(variables[index])
+                else:
+                    literals.append(self._invert(variables[index]))
+            terms.append(self._conjunction(literals))
+        return self._or(terms)
 
     def _is_sum_modulo(self, first: int, second: int, result: int) -> bool:
         return (first + second - result) % self.modulus == 0

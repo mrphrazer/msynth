@@ -15,7 +15,7 @@ msynth is built on top of [Miasm](https://github.com/cea-sec/miasm) and inspired
 
 * ["Augmenting Search-based Program Synthesis with Local Inference Rules to Improve Black-box Deobfuscation"](https://binsec.github.io/assets/publications/papers/2025-ccs.pdf) by Vidal Attias, Nicolas Bellec, Grégoire Menguy, Sébastien Bardin and Jean-Yves Marion (CCS 2025).
 
-* ["Efficient Deobfuscation of Linear Mixed Boolean-Arithmetic Expressions"](https://arxiv.org/abs/2209.06335) by Benjamin Reichenwallner and Peter Meerwald-Stadler (CheckMATE 2022).
+* ["Simplification of General Mixed Boolean-Arithmetic Expressions: GAMBA"](https://arxiv.org/abs/2305.06763) by Benjamin Reichenwallner and Peter Meerwald-Stadler (WORMA 2023).
 
 
 It can be used in combination with Miasm's symbolic execution engine to simplify complex expressions in obfuscated code or as a standalone tool to play around with MBA simplification.

@@ -83,6 +83,14 @@ def test_iter_child_expressions_covers_common_miasm_shapes() -> None:
     assert iter_child_expressions(composed) == (x, y)
 
 
+def test_iter_child_expressions_keeps_repeated_siblings() -> None:
+    # Repeated operands must NOT be deduplicated: x + x has two children, so
+    # the tree-size metric counts the true AST (3 nodes), not a 2-node graph.
+    x = ExprId("x", 8)
+    assert iter_child_expressions(ExprOp("+", x, x)) == (x, x)
+    assert bounded_tree_size(ExprOp("+", x, x), 10) == 3
+
+
 def test_bounded_tree_size_stops_at_limit() -> None:
     x = ExprId("x", 8)
     expr = ExprOp("+", ExprOp("+", x, ExprInt(1, 8)), ExprInt(2, 8))
@@ -95,11 +103,16 @@ def test_is_strictly_smaller_tree_uses_bounded_candidate_count() -> None:
     x = ExprId("x", 8)
     original = ExprOp("+", ExprOp("&", x, ExprInt(1, 8)), ExprOp("|", x, ExprInt(2, 8)))
     smaller = x
-    same_size = ExprOp("^", x, ExprInt(1, 8))
+    # two DISTINCT expressions of the same size (3 nodes each)
+    same_size_a = ExprOp("^", x, ExprInt(1, 8))
+    same_size_b = ExprOp("+", x, ExprInt(2, 8))
     larger = ExprOp(
         "*", x, ExprOp("^", ExprOp("<<", ExprInt(2, 8), -x), ExprInt(0xFF, 8))
     )
 
     assert is_strictly_smaller_tree(smaller, original)
-    assert not is_strictly_smaller_tree(same_size, same_size)
-    assert not is_strictly_smaller_tree(larger, same_size)
+    # equal size but distinct expressions -> NOT strictly smaller (not a
+    # trivial self-comparison, which could never be strictly smaller anyway)
+    assert not is_strictly_smaller_tree(same_size_a, same_size_b)
+    # a genuinely larger candidate is not a simplification of the original
+    assert not is_strictly_smaller_tree(larger, original)

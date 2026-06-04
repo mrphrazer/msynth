@@ -6,7 +6,14 @@ It is designed to augment oracle-based simplification with constant recovery:
 
 - Templates contain placeholders c0, c1, ... for unknown constants.
 - Subtrees are unified to p0, p1, ... before solving.
-- Z3 is used to solve constants; validation adds counterexamples to refine.
+- Z3 is used to solve the constants from a handful of I/O samples; the
+  candidate is then validated by counterexample-guided I/O sampling. CEGIS does
+  NOT prove equivalence itself — equivalence is enforced by the caller's
+  suitability gate (``Simplifier._is_suitable_simplification_candidate``:
+  strictly-smaller + Z3 equivalence with an adversarial edge-probe, permissive
+  on Z3 timeout), the single acceptance check shared with the oracle and
+  subtree-SimBA tiers. A self-proof here would time out on obfuscated MBA
+  subtrees and make CEGIS give up on otherwise-correct candidates.
 
 The solver is conservative by design and meant to be used as a fallback when
 the main oracle lookup fails.
@@ -440,6 +447,7 @@ class CegisSolver:
         validation_samples: int = 16,
         expand_templates: bool = True,
         expansion_budget: int = 40,
+        seed: int = 0,
     ) -> None:
         """
         Initializes the CEGIS solver.
@@ -453,6 +461,10 @@ class CegisSolver:
             validation_samples: Samples per validation iteration.
             expand_templates: Enable adaptive template expansion.
             expansion_budget: Max expanded templates to consider.
+            seed: Seed for the validation-sampling RNG. Sampling drives
+                counterexample-guided refinement and candidate acceptance here;
+                final equivalence is enforced by the caller's suitability gate.
+                A fixed seed keeps the refinement path reproducible across runs.
         """
         self.template_oracle = template_oracle
         self.max_templates = max_templates
@@ -463,6 +475,7 @@ class CegisSolver:
         self.expand_templates = expand_templates
         self.expansion_budget = expansion_budget
         self._translator_z3 = TranslatorZ3()
+        self._rng = random.Random(seed)
 
     @staticmethod
     def _resize_expr(expr: Expr, size: int) -> Expr:
@@ -510,7 +523,10 @@ class CegisSolver:
                 CegisSolver._resize_expr(expr.src, size),
             )
         if isinstance(expr, ExprMem):
-            return ExprMem(CegisSolver._resize_expr(expr.ptr, size), expr.size)
+            # The "value" of a memory access is the loaded word; resizing
+            # means changing the access width to ``size``. The pointer is an
+            # address expression and must keep its own width untouched.
+            return ExprMem(expr.ptr, size)
         return expr
 
     @staticmethod
@@ -546,10 +562,15 @@ class CegisSolver:
         # Use SimplificationOracle evaluation to respect Miasm semantics.
         return SimplificationOracle.evaluate_expression(expr, inputs)
 
-    @staticmethod
-    def _gen_validation_inputs(num_vars: int, size: int, count: int) -> List[List[int]]:
+    def _gen_validation_inputs(
+        self, num_vars: int, size: int, count: int
+    ) -> List[List[int]]:
         """
         Generates a deterministic prefix of inputs, then fills with random values.
+
+        The random tail is drawn from the solver's seeded RNG (``self._rng``),
+        so a given solver instance produces the same validation inputs across
+        runs.
 
         Args:
             num_vars: Number of unified variables.
@@ -569,7 +590,7 @@ class CegisSolver:
         ]
         inputs = base[: min(len(base), count)]
         while len(inputs) < count:
-            inputs.append([random.getrandbits(size) & mask for _ in range(num_vars)])
+            inputs.append([self._rng.getrandbits(size) & mask for _ in range(num_vars)])
         return inputs
 
     def _validate_candidate(
@@ -602,31 +623,63 @@ class CegisSolver:
 
     def _expand_templates(self, templates: List[Expr], size: int) -> List[Expr]:
         """
-        Expands templates with small wrappers to increase coverage.
+        Expands templates with light wrappers to add coverage.
+
+        Layout: every base template's bare form lands in the output first,
+        then wrappers are appended round-by-round (one round = "apply
+        wrapper W to every base"). This guarantees that even high-index
+        base templates such as ``(c0 * p0) + c1`` reach the iteration
+        pool before the budget runs out — the previous design exhausted
+        the budget on five wrappers of the first eight bases, leaving
+        every subsequent base unreachable.
+
+        Wrapper placeholders use the names ``c{N}`` for N starting at the
+        smallest unused index across the base template set. Base
+        templates use ``c0`` and ``c1``, so wrappers use ``c2``/``c3``;
+        Z3 then solves wrapper constants independently of the inner
+        template's constants instead of forcing them to share a value.
+        The previous design reused the names ``c0``/``c1`` which made
+        every expanded variant a *strict subset* of what the base
+        template already matched (the wrapper had to satisfy the same
+        Z3 variable as one of the inner placeholders).
+
+        ``expansion_budget`` is now the *additional* template count
+        beyond the base set. Setting it to 0 is equivalent to
+        ``expand_templates=False``.
 
         Args:
             templates: Base templates to expand.
             size: Bit-width for the expansion.
 
         Returns:
-            Expanded template list (bounded by expansion_budget).
+            Bases (verbatim) followed by up to ``expansion_budget``
+            wrapper variants.
         """
         if not templates or self.expansion_budget <= 0:
-            return templates
-        c0 = ExprId("c0", size)
-        c1 = ExprId("c1", size)
-        expanded: List[Expr] = []
-        for template in templates:
-            resized = self._resize_expr(template, size)
-            # Wrap the base template with light constant variants.
-            expanded.append(resized)
-            expanded.append(resized + c0)
-            expanded.append(resized ^ c0)
-            expanded.append((resized & c0) | c1)
-            expanded.append((resized + c0) ^ c1)
-            if len(expanded) >= self.expansion_budget:
-                break
-        return expanded[: self.expansion_budget]
+            return [self._resize_expr(t, size) for t in templates]
+
+        resized = [self._resize_expr(t, size) for t in templates]
+        # Fresh wrapper placeholders. ``c2``/``c3`` keep the ``c``
+        # prefix so :meth:`_placeholder_vars` discovers them via the
+        # existing ``^c[0-9]+$`` regex and Z3 solves them.
+        c2 = ExprId("c2", size)
+        c3 = ExprId("c3", size)
+        wrappers = [
+            lambda r: r + c2,
+            lambda r: r ^ c2,
+            lambda r: (r & c2) | c3,
+            lambda r: (r + c2) ^ c3,
+        ]
+
+        out: List[Expr] = list(resized)
+        added = 0
+        for wrap in wrappers:
+            for r in resized:
+                if added >= self.expansion_budget:
+                    return out
+                out.append(wrap(r))
+                added += 1
+        return out
 
     def _solve_template(
         self,
@@ -699,7 +752,13 @@ class CegisSolver:
         2) Looks up candidate templates by truncated key; falls back to all
            templates if no key matches.
         3) Solves placeholder constants with Z3 and reconstructs the candidate.
-        4) Reverses unification (pN -> original terminals) before returning.
+        4) Validates the candidate against the subtree by counterexample-guided
+           I/O sampling; a disagreeing sample feeds the next solve. A candidate
+           that survives the sample set is returned. CEGIS does NOT prove
+           equivalence itself -- that is the caller's suitability gate's job
+           (see module docstring), so an unprovable-but-sample-consistent
+           candidate is returned here and accepted/rejected upstream.
+        5) Reverses unification (pN -> original terminals) before returning.
 
         Args:
             subtree: Original subtree (used for size and final mapping).
@@ -707,7 +766,8 @@ class CegisSolver:
             unification_dict: Map from original terminals to pN variables.
 
         Returns:
-            Candidate expression with constants instantiated, or None.
+            Candidate expression with constants instantiated (sample-validated,
+            not self-proven; equivalence is enforced by the caller), or None.
 
         Example:
             >>> from msynth.utils.unification import gen_unification_dict
@@ -715,7 +775,7 @@ class CegisSolver:
             >>> udict = gen_unification_dict(subtree)        # {v0: p0}
             >>> unified = subtree.replace_expr(udict)         # p0*0x47 + 0x13
             >>> solver.try_synthesize(subtree, unified, udict)
-            ExprOp('+', ExprOp('*', v0, ExprInt(0x47, 8)), ExprInt(0x13, 8))
+            ExprOp('+', ExprOp('*', ExprInt(0x47, 8), v0), ExprInt(0x13, 8))
         """
         if len(unification_dict) > self.max_variables:
             return None
@@ -731,8 +791,12 @@ class CegisSolver:
             self.template_oracle.get_skeleton_templates(unified_subtree)
         )
 
-        # Tier 2 (existing): I/O-behaviour-keyed lookup. Still useful for
-        # the rare case of exact behavioural match on the truncated key.
+        # Tier 2: I/O-behaviour-keyed lookup. NOTE: oracles built by
+        # ``gen_runtime_oracle`` store every template under the synthetic "*"
+        # bucket (not under an I/O key), so for the default runtime oracle this
+        # tier returns nothing and only the skeleton tier (1) and full-scan
+        # tier (3) carry the load. It still works for oracles populated by hand
+        # via ``add_template(template, outputs)`` with real I/O keys.
         equiv_key = self.template_oracle.determine_equiv_key(base_outputs)
         keyed_templates = list(self.template_oracle.get_templates(equiv_key))
 
@@ -785,6 +849,15 @@ class CegisSolver:
                     unified_subtree, candidate, num_vars, subtree.size
                 )
                 if counterexample is None:
+                    # Sampling found no disagreement -- accept. Equivalence is
+                    # NOT proven here on purpose: the caller's suitability gate
+                    # (_is_suitable_simplification_candidate in
+                    # Simplifier.simplify tier-c: strictly-smaller + Z3
+                    # equivalence with the adversarial edge-probe, permissive on
+                    # Z3 timeout) is the single authoritative acceptance check,
+                    # identical to the oracle and subtree-SimBA tiers. A hard
+                    # proof here would time out on obfuscated MBA subtrees and
+                    # make CEGIS give up on otherwise-correct candidates.
                     return reverse_unification(candidate, unification_dict)
 
                 # Counterexample-guided refinement: add failing input/output.

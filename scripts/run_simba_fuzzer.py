@@ -45,6 +45,7 @@ if str(REPO_ROOT) not in sys.path:
 from miasm.expression.expression import (  # noqa: E402
     Expr,
     ExprCompose,
+    ExprCond,
     ExprId,
     ExprInt,
     ExprMem,
@@ -54,19 +55,32 @@ from miasm.expression.expression import (  # noqa: E402
 
 from msynth.simplification.simba import SimbaPass, _collect_atoms  # noqa: E402
 
+_LINEAR_MBA_OPS = frozenset({"+", "-", "*", "&", "|", "^"})
+
 
 def _node_count(expr: Expr) -> int:
     return len(expr.graph().nodes())
 
 
 def _evaluate_atomic(expr: Expr, env: dict[Expr, int]) -> int:
-    """Cube/sample evaluator that treats Id/Mem/Slice/Compose as atoms."""
+    """Cube/sample evaluator that mirrors SimbaPass's atomisation rule.
+
+    Treats every primary leaf (Id/Mem/Slice/Compose/Cond) AND every
+    ExprOp whose op string is outside the linear-MBA fragment as
+    opaque atomic lookups. Anything else (the fragment ops over
+    well-typed args) is evaluated by recursion. Must stay in lockstep
+    with ``_classify_uncached`` in ``msynth/simplification/simba.py``.
+    """
     mask = (1 << expr.size) - 1
     if isinstance(expr, ExprInt):
         return int(expr) & mask
-    if isinstance(expr, (ExprId, ExprMem, ExprSlice, ExprCompose)):
+    if isinstance(expr, (ExprId, ExprMem, ExprSlice, ExprCompose, ExprCond)):
         return env.get(expr, 0) & mask
     if isinstance(expr, ExprOp):
+        if expr.op not in _LINEAR_MBA_OPS:
+            # Non-linear-fragment op — SimbaPass atomises this; mirror
+            # that by looking up the whole node in env.
+            return env.get(expr, 0) & mask
         args = [_evaluate_atomic(arg, env) for arg in expr.args]
         if expr.op == "-" and len(args) == 1:
             return (-args[0]) & mask
@@ -150,6 +164,39 @@ def _leaf_pool() -> list[Expr]:
     ]
 
 
+def _nonlinear_leaf_pool() -> list[Expr]:
+    """
+    Extended 16-bit atom pool covering the GAMBA 5.5 operator-level
+    atomisation cases: shifts (logical + arithmetic), rotations,
+    division/modulo, count-leading/trailing-zeros, exponentiation,
+    ``ExprCond``, plus the original four atom kinds. Every entry is
+    a width-16 expression whose root operator (or whose node type)
+    is atomised by SimbaPass — the cube reasoning sees them as
+    opaque BITWISE atoms.
+    """
+    fx = ExprId("fx", 16)
+    fy = ExprId("fy", 16)
+    return [
+        # Original four kinds.
+        fx,
+        fy,
+        ExprMem(ExprId("fptr", 64), 16),
+        ExprSlice(ExprId("fbig", 32), 0, 16),
+        ExprCompose(ExprId("flo", 8), ExprId("fhi", 8)),
+        # Operator-level atomisation candidates (GAMBA 5.5).
+        ExprOp("<<", fx, ExprInt(3, 16)),
+        ExprOp(">>", fx, ExprInt(5, 16)),
+        ExprOp("a>>", fx, fy),
+        ExprOp("<<<", fx, ExprInt(7, 16)),
+        ExprOp(">>>", fx, ExprInt(5, 16)),
+        ExprOp("/", fx, fy),
+        ExprOp("%", fx, fy),
+        ExprOp("cntleadzeros", fx),
+        ExprOp("cnttrailzeros", fx),
+        ExprCond(ExprId("fc", 1), fx, fy),
+    ]
+
+
 def _random_bitwise(
     rng: random.Random, leaves: list[Expr], size: int, depth: int
 ) -> Expr:
@@ -218,11 +265,17 @@ def _random_wide_mba(
 
 
 def _check_one(
-    seed: int, *, depth: int, timeout_ms: int, samples: int, wide: bool
+    seed: int,
+    *,
+    depth: int,
+    timeout_ms: int,
+    samples: int,
+    wide: bool,
+    nonlinear_leaves: bool,
 ) -> str:
     """Returns one of ``"ok"``, ``"noop"``, ``"counter"``, ``"unknown"``."""
     rng = random.Random(seed)
-    leaves = _leaf_pool()
+    leaves = _nonlinear_leaf_pool() if nonlinear_leaves else _leaf_pool()
     generator = _random_wide_mba if wide else _random_linear_mba
     source = generator(rng, leaves, size=16, depth=depth)
     rewritten = SimbaPass().run(source)
@@ -308,6 +361,16 @@ def main() -> int:
             "any rewrite SimbaPass produces must still be sound."
         ),
     )
+    parser.add_argument(
+        "--nonlinear-leaves",
+        action="store_true",
+        help=(
+            "Extend the leaf pool with operator-level atomisation "
+            "candidates (shifts, rotations, division/modulo, "
+            "count-zeros, ExprCond). Exercises GAMBA 5.5 paths in "
+            "SimbaPass's classifier."
+        ),
+    )
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -324,6 +387,7 @@ def main() -> int:
             timeout_ms=args.timeout_ms,
             samples=args.samples,
             wide=args.wide,
+            nonlinear_leaves=args.nonlinear_leaves,
         )
         counts[status] += 1
         if status == "counter" and args.fail_fast:

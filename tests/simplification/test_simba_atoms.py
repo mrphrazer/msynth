@@ -46,7 +46,14 @@ from miasm.expression.expression import (
 )
 from miasm.expression.simplifications import expr_simp
 
-from msynth.simplification.simba import SimbaPass, _collect_atoms
+from msynth.simplification.simba import (
+    SimbaPass,
+    _ExpressionKind,
+    _SimbaSimplifier,
+    _bitwise_refine,
+    _classify,
+    _collect_atoms,
+)
 
 
 def _node_count(expr: Expr) -> int:
@@ -56,16 +63,21 @@ def _node_count(expr: Expr) -> int:
 def _evaluate_with_atoms(expr: Expr, env: dict[Expr, int]) -> int:
     """
     Evaluate ``expr`` on a boolean-cube assignment, treating ExprId,
-    ExprMem, ExprSlice, and ExprCompose as opaque atomic lookups. Mirrors
-    SimbaPass's cube semantics so the test can assert equivalence by
-    direct enumeration on small atom counts.
+    ExprMem, ExprSlice, ExprCompose, and ExprCond as opaque atomic
+    lookups. Mirrors SimbaPass's cube semantics under the atomisation
+    extension so the test can assert equivalence by direct enumeration
+    on small atom counts.
     """
     mask = (1 << expr.size) - 1
     if isinstance(expr, ExprInt):
         return int(expr) & mask
-    if isinstance(expr, (ExprId, ExprMem, ExprSlice, ExprCompose)):
+    if isinstance(expr, (ExprId, ExprMem, ExprSlice, ExprCompose, ExprCond)):
         return env.get(expr, 0) & mask
     if isinstance(expr, ExprOp):
+        # ExprOps whose op isn't in the linear-MBA fragment are
+        # atomised by SimbaPass — mirror that here.
+        if expr.op not in {"+", "-", "*", "&", "|", "^"}:
+            return env.get(expr, 0) & mask
         args = [_evaluate_with_atoms(arg, env) for arg in expr.args]
         if expr.op == "-" and len(args) == 1:
             return (-args[0]) & mask
@@ -246,13 +258,20 @@ def test_simba_classifier_rejects_compose_with_shift_outside() -> None:
     assert SimbaPass().run(expr) is expr
 
 
-def test_simba_classifier_rejects_cond_mixed_with_slice() -> None:
+def test_simba_atomises_cond_plus_slice_soundly() -> None:
+    # Under the atomisation extension, both ExprCond and ExprSlice
+    # are primary atoms, so ``cond + slice`` IS a two-atom linear
+    # MBA and SimbaPass reconstructs over it. The output may not be
+    # syntactically identical to the input; the invariant pinned here
+    # is semantic equivalence.
     x = ExprId("x", 32)
     y = ExprId("y", 32)
     c = ExprId("c", 1)
     cond = ExprCond(c, ExprSlice(x, 0, 8), ExprSlice(y, 0, 8))
     expr = cond + ExprSlice(x, 0, 8)
-    assert SimbaPass().run(expr) is expr
+    out = SimbaPass().run(expr)
+    _assert_equivalent_on_cube(out, expr, [cond, ExprSlice(x, 0, 8)])
+    assert _z3_equivalent(expr, out)
 
 
 def test_simba_classifier_rejects_compose_times_compose() -> None:
@@ -522,7 +541,11 @@ def _z3_equivalent(left: Expr, right: Expr) -> bool:
     z3_left = translator.from_expr(left)
     z3_right = translator.from_expr(right)
     solver = z3.Solver()
-    solver.set("timeout", 5000)
+    # 30s headroom: these J-category multi-atom queries solve in a few seconds
+    # unloaded, but a 5s cap flaked under heavy/parallel suite load (Z3 returns
+    # unknown, which this helper treats as a hard failure). Generous headroom
+    # keeps a genuine timeout loud without spurious flakes.
+    solver.set("timeout", 30000)
     solver.add(z3_left != z3_right)
     result = solver.check()
     if result == z3.unknown:
@@ -588,3 +611,648 @@ def test_simba_z3_xor_allones_with_slice_in_and() -> None:
     b = ExprId("y", 8)
     expr = (a ^ ExprInt(0xFF, 8)) & b
     assert _z3_equivalent(expr, SimbaPass().run(expr))
+
+
+# ---------------------------------------------------------------------------
+# Soundness gate for the post-assembly _bitwise_refine polish
+# ---------------------------------------------------------------------------
+#
+# _bitwise_refine runs the GAMBA §5.2 no-grow rules once on the fully-assembled
+# SimBA reconstruction (end of _SimbaSimplifier.simplify). It was previously
+# disabled because applying it PER QM REGION perturbed the multi-coefficient
+# assembly; applied to the complete output it must be semantics-preserving.
+# These cases gate that, plus the affine / division-atom / three-atom-mix
+# shapes the disabled NOTE specifically warned about.
+
+
+def test_simba_bitwise_refine_is_sound() -> None:
+    x = ExprId("x", 8)
+    y = ExprId("y", 8)
+    z = ExprId("z", 8)
+    battery = [
+        ~(~x),  # double negation
+        (x & x) + y,  # idempotence inside a sum
+        (x & y) | (x & (~y)),  # complement pair -> x
+        x | (~x),  # redundancy -> all-ones
+        (x ^ y) + ExprInt(2, 8) * (x & y),  # linear-MBA identity (== x + y)
+        ExprInt(5, 8) * ((x & y) + (x | y)) + ExprInt(3, 8),  # affine combination
+        x + y + z,  # three-atom mix
+    ]
+    for expr in battery:
+        assert _z3_equivalent(expr, _bitwise_refine(expr)), expr
+
+
+def test_simba_bitwise_refine_actually_fires() -> None:
+    # Guard against the polish silently degenerating into a no-op: it must
+    # strictly shrink at least one representative input.
+    x = ExprId("x", 8)
+    expr = (x & x) + ~(~x)  # both summands collapse to x -> 2*x / x + x
+    out = _bitwise_refine(expr)
+    assert out != expr
+    assert _node_count(out) < _node_count(expr)
+    assert _z3_equivalent(expr, out)
+
+
+def test_simba_run_equivalent_after_refine_on_mba_identities() -> None:
+    # End-to-end: the refine step is inside SimbaPass.run; output stays
+    # equivalent on classic MBA identities.
+    x = ExprId("x", 16)
+    y = ExprId("y", 16)
+    battery = [
+        (x ^ y) + ExprInt(2, 16) * (x & y),  # == x + y
+        (x | y) + (x & y),  # == x + y
+        (x | y) - (x & y),  # == x ^ y
+    ]
+    for expr in battery:
+        assert _z3_equivalent(expr, SimbaPass().run(expr)), expr
+
+
+# ===========================================================================
+# GAMBA 5.5 — operator-level atomisation extension
+# ===========================================================================
+#
+# The categories below test SiMBA's behaviour when its classifier
+# encounters miasm IL operators OUTSIDE the linear-MBA fragment —
+# shifts, rotations, division/modulo, bit-counting primitives,
+# exponentiation, ``*`` with two non-arithmetic operands, and
+# ``ExprCond``. These nodes are atomised by ``_classify_uncached``'s
+# fast path: the whole subtree becomes one opaque BITWISE atom and
+# the surrounding linear-MBA cube reasoning operates over that atom
+# uniformly.
+#
+# Operand-kind rejections (``&`` over BITWISE+MIXED, ``*`` with two
+# non-arithmetic operands, ``^`` over MIXED+MIXED, ...) are deliberately
+# NOT atomised — they propagate ``None`` from ``_classify`` so SiMBA
+# remains a no-op on those shapes, matching pre-extension behaviour
+# (otherwise the demo-MBA regression of 9 → 13 nodes returns; see
+# ``test_simplifier_demo_mba_reaches_shortest_form_with_placeholder_guard``).
+# Category Y below pins this regression boundary.
+
+# Representative atoms per non-linear operator family. Each is a node
+# the classifier rejects at the OP LEVEL (op not in {+, -, *, &, |, ^}).
+# Width-matched to 32 bits so they can compose freely with the existing
+# slice/compose atoms in the same expressions.
+_X32 = ExprId("x", 32)
+_Y32 = ExprId("y", 32)
+_C1 = ExprId("c", 1)
+_SHIFT_L = ExprOp("<<", _X32, ExprInt(3, 32))
+_SHIFT_R = ExprOp(">>", _X32, ExprInt(5, 32))
+_SHIFT_AR = ExprOp("a>>", _X32, _Y32)
+_ROT_L = ExprOp("<<<", _X32, ExprInt(7, 32))
+_ROT_R = ExprOp(">>>", _X32, ExprInt(5, 32))
+_DIV = ExprOp("/", _X32, _Y32)
+_MOD = ExprOp("%", _X32, _Y32)
+_SDIV = ExprOp("sdiv", _X32, _Y32)
+_SMOD = ExprOp("smod", _X32, _Y32)
+_CLZ = ExprOp("cntleadzeros", _X32)
+_CTZ = ExprOp("cnttrailzeros", _X32)
+_PAR = ExprOp("parity", _X32)
+_POW = ExprOp("**", _X32, _Y32)
+_COND = ExprCond(_C1, _X32, _Y32)
+
+
+# ---------------------------------------------------------------------------
+# Category K — atom collector tripwires (operator-level atomisation)
+# ---------------------------------------------------------------------------
+
+
+def test_collect_atoms_treats_shift_left_as_atom_not_descending() -> None:
+    # ``<<`` is outside the linear-MBA fragment; the walker must
+    # treat the whole shift as one atom and NOT recurse into ``x``.
+    # Descending would vary ``x`` independently of the shift's value
+    # in the cube, breaking the soundness sketch.
+    assert _collect_atoms(_SHIFT_L) == [_SHIFT_L]
+
+
+def test_collect_atoms_treats_shift_right_as_atom() -> None:
+    assert _collect_atoms(_SHIFT_R) == [_SHIFT_R]
+
+
+def test_collect_atoms_treats_arith_shift_right_as_atom() -> None:
+    assert _collect_atoms(_SHIFT_AR) == [_SHIFT_AR]
+
+
+def test_collect_atoms_treats_rotate_left_as_atom() -> None:
+    assert _collect_atoms(_ROT_L) == [_ROT_L]
+
+
+def test_collect_atoms_treats_rotate_right_as_atom() -> None:
+    assert _collect_atoms(_ROT_R) == [_ROT_R]
+
+
+def test_collect_atoms_treats_division_as_atom() -> None:
+    assert _collect_atoms(_DIV) == [_DIV]
+
+
+def test_collect_atoms_treats_modulo_as_atom() -> None:
+    assert _collect_atoms(_MOD) == [_MOD]
+
+
+def test_collect_atoms_treats_signed_division_as_atom() -> None:
+    assert _collect_atoms(_SDIV) == [_SDIV]
+
+
+def test_collect_atoms_treats_signed_modulo_as_atom() -> None:
+    assert _collect_atoms(_SMOD) == [_SMOD]
+
+
+def test_collect_atoms_treats_count_leading_zeros_as_atom() -> None:
+    assert _collect_atoms(_CLZ) == [_CLZ]
+
+
+def test_collect_atoms_treats_count_trailing_zeros_as_atom() -> None:
+    assert _collect_atoms(_CTZ) == [_CTZ]
+
+
+def test_collect_atoms_treats_parity_as_atom() -> None:
+    assert _collect_atoms(_PAR) == [_PAR]
+
+
+def test_collect_atoms_treats_power_as_atom() -> None:
+    assert _collect_atoms(_POW) == [_POW]
+
+
+def test_collect_atoms_treats_cond_as_atom() -> None:
+    # ExprCond joins the primary-leaf set under the atomisation
+    # extension. Its branches' variables (``x``, ``y``) must NOT be
+    # exposed to the cube — only the cond as a whole.
+    assert _collect_atoms(_COND) == [_COND]
+
+
+def test_collect_atoms_dedupes_repeated_shift_atom() -> None:
+    # Structural equality must dedupe two textually-identical shift
+    # subtrees, or ``e ^ e`` won't collapse.
+    e = _SHIFT_R + _SHIFT_R + _SHIFT_R
+    assert _collect_atoms(e) == [_SHIFT_R]
+
+
+def test_collect_atoms_dedupes_repeated_cond_atom() -> None:
+    e = _COND & _COND
+    assert _collect_atoms(e) == [_COND]
+
+
+# ---------------------------------------------------------------------------
+# Category M — classifier tripwires (atom kind + is_atom flag)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_marks_shift_as_bitwise_atom() -> None:
+    kind, is_atom = _classify(_SHIFT_R, 32)
+    assert kind is _ExpressionKind.BITWISE
+    assert is_atom is True
+
+
+def test_classify_marks_rotation_as_bitwise_atom() -> None:
+    kind, is_atom = _classify(_ROT_L, 32)
+    assert kind is _ExpressionKind.BITWISE
+    assert is_atom is True
+
+
+def test_classify_marks_division_as_bitwise_atom() -> None:
+    kind, is_atom = _classify(_DIV, 32)
+    assert kind is _ExpressionKind.BITWISE
+    assert is_atom is True
+
+
+def test_classify_marks_modulo_as_bitwise_atom() -> None:
+    kind, is_atom = _classify(_MOD, 32)
+    assert kind is _ExpressionKind.BITWISE
+    assert is_atom is True
+
+
+def test_classify_marks_count_leading_zeros_as_bitwise_atom() -> None:
+    kind, is_atom = _classify(_CLZ, 32)
+    assert kind is _ExpressionKind.BITWISE
+    assert is_atom is True
+
+
+def test_classify_marks_parity_as_bitwise_atom() -> None:
+    # ``parity`` returns 1 bit in miasm — test it at its native
+    # width. Atomisation discipline is the same; the cube treats it
+    # as a 1-bit opaque atom.
+    kind, is_atom = _classify(_PAR, 1)
+    assert kind is _ExpressionKind.BITWISE
+    assert is_atom is True
+
+
+def test_classify_parity_at_wrong_parent_size_signals_no_op() -> None:
+    # Width mismatch at the parent level returns ``(None, True)`` —
+    # the no-op signal. Pins the size discipline that prevents a
+    # 1-bit ``parity`` from being mis-treated as a 32-bit atom.
+    kind, is_atom = _classify(_PAR, 32)
+    assert kind is None
+    assert is_atom is True
+
+
+def test_classify_marks_power_as_bitwise_atom() -> None:
+    kind, is_atom = _classify(_POW, 32)
+    assert kind is _ExpressionKind.BITWISE
+    assert is_atom is True
+
+
+def test_classify_marks_cond_as_bitwise_atom() -> None:
+    kind, is_atom = _classify(_COND, 32)
+    assert kind is _ExpressionKind.BITWISE
+    assert is_atom is True
+
+
+def test_classify_marks_linear_sum_of_shifts_as_decomposable() -> None:
+    # ``+`` of two shift atoms is in the linear-MBA fragment, with
+    # both args classifying as BITWISE atoms. The ``+`` itself is NOT
+    # an atom — SiMBA should reconstruct over the atom set.
+    expr = _SHIFT_L + _SHIFT_R
+    kind, is_atom = _classify(expr, 32)
+    assert kind is _ExpressionKind.MIXED
+    assert is_atom is False
+
+
+def test_classify_marks_sum_of_cond_atoms_as_decomposable() -> None:
+    expr = _COND + _COND
+    kind, is_atom = _classify(expr, 32)
+    assert kind is _ExpressionKind.MIXED
+    assert is_atom is False
+
+
+# ---------------------------------------------------------------------------
+# Category N — evaluator tripwires
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_looks_up_shift_atom_in_env() -> None:
+    sim = _SimbaSimplifier(_SHIFT_R + _SHIFT_R)
+    env = {_SHIFT_R: 7}
+    # Direct lookup — masked to 32 bits.
+    assert sim._evaluate(_SHIFT_R, env) == 7
+
+
+def test_evaluate_looks_up_cond_atom_in_env() -> None:
+    sim = _SimbaSimplifier(_COND + _COND)
+    env = {_COND: 0xAA}
+    assert sim._evaluate(_COND, env) == 0xAA
+
+
+def test_evaluate_does_not_recurse_into_shift_args() -> None:
+    # Even though ``x`` appears inside the shift, the evaluator
+    # must NOT evaluate ``x`` separately — the shift is one atom.
+    sim = _SimbaSimplifier(_SHIFT_R + _SHIFT_R)
+    env = {_SHIFT_R: 3}  # NOT providing _X32
+    # No KeyError despite _X32 being absent from env.
+    assert sim._evaluate(_SHIFT_R, env) == 3
+
+
+# ---------------------------------------------------------------------------
+# Category P — self-cancellation collapse over non-linear atoms
+# ---------------------------------------------------------------------------
+
+
+def test_simba_self_xor_of_shift_collapses_to_zero() -> None:
+    out = SimbaPass().run(_SHIFT_R ^ _SHIFT_R)
+    assert expr_simp(out) == ExprInt(0, 32)
+
+
+def test_simba_self_subtract_of_shift_collapses_to_zero() -> None:
+    out = SimbaPass().run(_SHIFT_R - _SHIFT_R)
+    assert expr_simp(out) == ExprInt(0, 32)
+
+
+def test_simba_self_and_of_shift_is_shift() -> None:
+    out = SimbaPass().run(_SHIFT_R & _SHIFT_R)
+    assert expr_simp(out) == _SHIFT_R
+
+
+def test_simba_self_or_of_shift_is_shift() -> None:
+    out = SimbaPass().run(_SHIFT_R | _SHIFT_R)
+    assert expr_simp(out) == _SHIFT_R
+
+
+def test_simba_self_xor_of_rotation_collapses_to_zero() -> None:
+    out = SimbaPass().run(_ROT_L ^ _ROT_L)
+    assert expr_simp(out) == ExprInt(0, 32)
+
+
+def test_simba_self_subtract_of_division_collapses_to_zero() -> None:
+    out = SimbaPass().run(_DIV - _DIV)
+    assert expr_simp(out) == ExprInt(0, 32)
+
+
+def test_simba_self_xor_of_count_leading_zeros_collapses_to_zero() -> None:
+    out = SimbaPass().run(_CLZ ^ _CLZ)
+    assert expr_simp(out) == ExprInt(0, 32)
+
+
+def test_simba_self_xor_of_cond_collapses_to_zero() -> None:
+    out = SimbaPass().run(_COND ^ _COND)
+    assert expr_simp(out) == ExprInt(0, 32)
+
+
+def test_simba_self_subtract_of_cond_collapses_to_zero() -> None:
+    out = SimbaPass().run(_COND - _COND)
+    assert expr_simp(out) == ExprInt(0, 32)
+
+
+def test_simba_self_and_of_cond_is_cond() -> None:
+    out = SimbaPass().run(_COND & _COND)
+    assert expr_simp(out) == _COND
+
+
+# ---------------------------------------------------------------------------
+# Category Q — coefficient folding over non-linear atoms
+# ---------------------------------------------------------------------------
+
+
+def test_simba_shift_atom_sum_folds_to_double() -> None:
+    expr = _SHIFT_R + _SHIFT_R
+    out = SimbaPass().run(expr)
+    _assert_equivalent_on_cube(out, expr, [_SHIFT_R])
+    # The reconstruction must agree on the cube; structural form may
+    # be ``2 * SHIFT_R`` or equivalent.
+    assert _z3_equivalent(expr, out)
+
+
+def test_simba_shift_atom_double_andor_identity_collapses() -> None:
+    # ``(a & b) + (a | b)`` over two distinct shift atoms — same
+    # paper identity as for slice/compose, now over shift atoms.
+    a = _SHIFT_R
+    b = ExprOp(">>", _Y32, ExprInt(5, 32))
+    expr = (a & b) + (a | b)
+    out = SimbaPass().run(expr)
+    _assert_equivalent_on_cube(out, expr, [a, b])
+    assert _z3_equivalent(expr, out)
+
+
+def test_simba_cond_atom_sum_folds_to_double() -> None:
+    expr = _COND + _COND
+    out = SimbaPass().run(expr)
+    _assert_equivalent_on_cube(out, expr, [_COND])
+    assert _z3_equivalent(expr, out)
+
+
+def test_simba_cond_atom_andor_identity_collapses() -> None:
+    a = _COND
+    b = ExprCond(_C1, _Y32, _X32)
+    expr = (a & b) + (a | b)
+    out = SimbaPass().run(expr)
+    _assert_equivalent_on_cube(out, expr, [a, b])
+    assert _z3_equivalent(expr, out)
+
+
+def test_simba_division_atom_xor_paper_identity_collapses() -> None:
+    # ``-(a | ~b) + ~b + (a & ~b) + b = a ^ b`` for any opaque atoms
+    # a and b. Test it with two distinct division subtrees.
+    a = _DIV
+    b = ExprOp("/", _Y32, _X32)
+    expr = (
+        (-(a | (b ^ ExprInt(0xFFFFFFFF, 32))))
+        + (b ^ ExprInt(0xFFFFFFFF, 32))
+        + (a & (b ^ ExprInt(0xFFFFFFFF, 32)))
+        + b
+    )
+    out = SimbaPass().run(expr)
+    assert _z3_equivalent(expr, out)
+
+
+# ---------------------------------------------------------------------------
+# Category R — cross-family / mixed atom kinds with non-linear atoms
+# ---------------------------------------------------------------------------
+
+
+def test_simba_register_plus_shift_atom_decomposes() -> None:
+    expr = _X32 + _SHIFT_R
+    out = SimbaPass().run(expr)
+    _assert_equivalent_on_cube(out, expr, [_X32, _SHIFT_R])
+
+
+def test_simba_slice_plus_cond_atom_decomposes() -> None:
+    sl = ExprSlice(_X32, 0, 32)
+    expr = sl + _COND
+    out = SimbaPass().run(expr)
+    _assert_equivalent_on_cube(out, expr, [sl, _COND])
+
+
+def test_simba_memory_plus_division_atom_decomposes() -> None:
+    mem = ExprMem(ExprId("ptr", 64), 32)
+    expr = mem + _DIV
+    out = SimbaPass().run(expr)
+    _assert_equivalent_on_cube(out, expr, [mem, _DIV])
+
+
+def test_simba_three_kinds_register_shift_cond_decomposes() -> None:
+    expr = _X32 + _SHIFT_R + _COND
+    out = SimbaPass().run(expr)
+    _assert_equivalent_on_cube(out, expr, [_X32, _SHIFT_R, _COND])
+
+
+def test_simba_paper_identity_over_shift_and_cond() -> None:
+    a = _SHIFT_R
+    b = _COND
+    expr = (a & b) + (a | b)
+    out = SimbaPass().run(expr)
+    _assert_equivalent_on_cube(out, expr, [a, b])
+    assert _z3_equivalent(expr, out)
+
+
+# ---------------------------------------------------------------------------
+# Category S — atomised top-level pass-through (single-atom shapes
+# reconstruct to themselves and stay ``is expr`` for caller identity)
+# ---------------------------------------------------------------------------
+
+
+def test_simba_top_level_shift_passes_through() -> None:
+    assert SimbaPass().run(_SHIFT_R) is _SHIFT_R
+
+
+def test_simba_top_level_rotation_passes_through() -> None:
+    assert SimbaPass().run(_ROT_L) is _ROT_L
+
+
+def test_simba_top_level_division_passes_through() -> None:
+    assert SimbaPass().run(_DIV) is _DIV
+
+
+def test_simba_top_level_count_leading_zeros_passes_through() -> None:
+    assert SimbaPass().run(_CLZ) is _CLZ
+
+
+def test_simba_top_level_power_passes_through() -> None:
+    assert SimbaPass().run(_POW) is _POW
+
+
+def test_simba_top_level_cond_passes_through() -> None:
+    assert SimbaPass().run(_COND) is _COND
+
+
+# ---------------------------------------------------------------------------
+# Category U — idempotence on non-linear-atom shapes
+# ---------------------------------------------------------------------------
+
+
+def test_simba_idempotent_on_shift_sum() -> None:
+    expr = _SHIFT_R + _SHIFT_R + _SHIFT_R
+    once = SimbaPass().run(expr)
+    twice = SimbaPass().run(once)
+    assert once == twice
+
+
+def test_simba_idempotent_on_cond_and_or_identity() -> None:
+    a = _COND
+    b = ExprCond(_C1, _Y32, _X32)
+    expr = (a & b) + (a | b)
+    once = SimbaPass().run(expr)
+    twice = SimbaPass().run(once)
+    assert once == twice
+
+
+def test_simba_idempotent_on_register_plus_shift() -> None:
+    expr = _X32 + _SHIFT_R + _SHIFT_R
+    once = SimbaPass().run(expr)
+    twice = SimbaPass().run(once)
+    assert once == twice
+
+
+# ---------------------------------------------------------------------------
+# Category Y — operand-kind rejection regression guard
+# ---------------------------------------------------------------------------
+#
+# These shapes are operand-kind rejections inside ``_apply_op_rule``:
+# the op string IS in ``{+, -, *, &, |, ^}`` but the kind combination
+# doesn't match a linear-MBA rule. The atomisation extension MUST NOT
+# atomise these — atomising them widens the atom set in ways the
+# downstream simplifier can't fold, regressing
+# ``test_simplifier_demo_mba_reaches_shortest_form_with_placeholder_guard``
+# (9 → 13 nodes). Each test pins SiMBA as a no-op (``is expr``).
+
+
+def test_simba_operand_kind_rejection_mul_two_non_arithmetic_no_op() -> None:
+    expr = ExprSlice(_X32, 0, 8) * ExprSlice(_Y32, 0, 8)
+    assert SimbaPass().run(expr) is expr
+
+
+def test_simba_operand_kind_rejection_and_bitwise_mixed_no_op() -> None:
+    # ``(x+y) & z`` — kinds [MIXED, BITWISE]. Atomising would expand
+    # the demo MBA's atom set.
+    expr = (_X32 + _Y32) & ExprId("z", 32)
+    assert SimbaPass().run(expr) is expr
+
+
+def test_simba_operand_kind_rejection_or_bitwise_arithmetic_no_op() -> None:
+    # ``x | 0xDEADBEEF`` — kinds [BITWISE, ARITHMETIC] (non-all-ones
+    # constant). Same operand-kind rejection class.
+    expr = _X32 | ExprInt(0xDEADBEEF, 32)
+    assert SimbaPass().run(expr) is expr
+
+
+def test_simba_operand_kind_rejection_xor_mixed_mixed_no_op() -> None:
+    a = _X32 & _Y32
+    b = _Y32 + _X32
+    expr = (a + ExprOp("-", _Y32)) ^ (b + ExprOp("-", _X32))
+    assert SimbaPass().run(expr) is expr
+
+
+def test_simba_operand_kind_rejection_propagates_through_outer_sum() -> None:
+    # Outer ``+`` would otherwise classify as MIXED, but an inner
+    # operand-kind rejection (`(x+y) & z`) propagates None upward,
+    # so the whole expression remains a no-op. Pins the strict
+    # propagation rule that prevents the demo-MBA regression.
+    inner = (_X32 + _Y32) & ExprId("z", 32)
+    expr = inner + ExprId("w", 32)
+    assert SimbaPass().run(expr) is expr
+
+
+# ---------------------------------------------------------------------------
+# Category T — Z3-checked directed equivalence (non-linear atoms)
+# ---------------------------------------------------------------------------
+
+
+def test_simba_z3_shift_paper_identity() -> None:
+    a = _SHIFT_R
+    b = ExprOp(">>", _Y32, ExprInt(5, 32))
+    expr = (a & b) + (a | b)
+    assert _z3_equivalent(expr, SimbaPass().run(expr))
+
+
+def test_simba_z3_rotation_paper_identity() -> None:
+    a = _ROT_L
+    b = ExprOp("<<<", _Y32, ExprInt(7, 32))
+    expr = (a & b) + (a | b)
+    assert _z3_equivalent(expr, SimbaPass().run(expr))
+
+
+def test_simba_z3_division_self_xor() -> None:
+    expr = _DIV ^ _DIV
+    assert _z3_equivalent(expr, SimbaPass().run(expr))
+
+
+def test_simba_z3_cond_paper_identity() -> None:
+    a = _COND
+    b = ExprCond(_C1, _Y32, _X32)
+    expr = (a & b) + (a | b)
+    assert _z3_equivalent(expr, SimbaPass().run(expr))
+
+
+def test_simba_z3_register_plus_shift() -> None:
+    expr = _X32 + _SHIFT_R
+    assert _z3_equivalent(expr, SimbaPass().run(expr))
+
+
+def test_simba_z3_three_atom_mix_register_shift_cond() -> None:
+    expr = _X32 + _SHIFT_R + _COND
+    assert _z3_equivalent(expr, SimbaPass().run(expr))
+
+
+def test_simba_z3_affine_over_shift_atom() -> None:
+    expr = ExprInt(5, 32) * _SHIFT_R + ExprInt(7, 32)
+    assert _z3_equivalent(expr, SimbaPass().run(expr))
+
+
+def test_simba_z3_xor_all_ones_with_shift_atom() -> None:
+    # ``~SHIFT`` (= SHIFT ^ 0xFFFFFFFF) — the all-ones path through
+    # the XOR rule must still classify cleanly once the shift is an
+    # atom.
+    expr = _SHIFT_R ^ ExprInt(0xFFFFFFFF, 32)
+    assert _z3_equivalent(expr, SimbaPass().run(expr))
+
+
+def test_simba_z3_xor_all_ones_with_cond_atom() -> None:
+    expr = _COND ^ ExprInt(0xFFFFFFFF, 32)
+    assert _z3_equivalent(expr, SimbaPass().run(expr))
+
+
+# ---------------------------------------------------------------------------
+# Category V — atom-set composition and dedup with non-linear atoms
+# ---------------------------------------------------------------------------
+
+
+def test_collect_atoms_register_shift_distinguished() -> None:
+    # ``x`` and ``x >> 5`` must be DISTINCT atoms even though they
+    # share the same base register — the shift's value depends on x
+    # but the cube treats them as independent (and the SiMBA theorem
+    # is sound on the full cube, which is a superset of the
+    # reachable pairs).
+    assert set(_collect_atoms(_X32 + _SHIFT_R)) == {_X32, _SHIFT_R}
+
+
+def test_collect_atoms_two_different_shift_amounts_distinguished() -> None:
+    a = ExprOp(">>", _X32, ExprInt(3, 32))
+    b = ExprOp(">>", _X32, ExprInt(5, 32))
+    assert set(_collect_atoms(a + b)) == {a, b}
+
+
+def test_collect_atoms_cond_and_inner_branch_register_distinguished() -> None:
+    # The cond is the atom; its branches' variables don't escape.
+    # Adding ``x`` (which is also inside the cond) creates TWO atoms.
+    expr = _X32 + _COND
+    assert set(_collect_atoms(expr)) == {_X32, _COND}
+
+
+def test_collect_atoms_division_dedup_in_xor() -> None:
+    expr = _DIV ^ _DIV
+    assert _collect_atoms(expr) == [_DIV]
+
+
+def test_collect_atoms_mixed_kinds_with_shift_atom() -> None:
+    # All four atom kinds + shift atom in one expression.
+    sl = ExprSlice(ExprId("xs", 64), 0, 32)
+    comp = ExprCompose(ExprId("clo", 16), ExprId("chi", 16))
+    mem = ExprMem(ExprId("ptr", 64), 32)
+    expr = sl + comp + mem + _SHIFT_R + _X32
+    assert set(_collect_atoms(expr)) == {sl, comp, mem, _SHIFT_R, _X32}

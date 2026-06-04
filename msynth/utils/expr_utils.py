@@ -42,30 +42,6 @@ def parse_expr(expr_str: str) -> Expr:
     return eval(expr_str, globals)
 
 
-def gen_unification_dict(expr: Expr) -> Dict[Expr, Expr]:
-    """
-    Generates a dictionary of unificiation variables.
-
-    For each unification candidate (terminal expressions such
-    as registers or memory), we generate placeholder variables
-    p<index> of the corresponding terminal expression size.
-
-    The resulting dictionary maps termial expressions to their
-    corresponding unification.
-
-    Args:
-        expr: Expression to generate unification variables for.
-
-    Returns:
-        Dictionary of expressions; terminals are mapped to unification variables.
-    """
-    return {
-        # {x: p0, y: p1, ...,}
-        unique_var: ExprId(f"p{index}", unique_var.size)
-        for index, unique_var in enumerate(get_unification_candidates(expr))
-    }
-
-
 def get_unique_variables(expr: Expr) -> List[Expr]:
     """
     Get all unique variables in an expression.
@@ -146,10 +122,13 @@ def get_unification_candidates(expr: Expr) -> List[Expr]:
 
 def get_subexpressions(expr: Expr) -> List[Expr]:
     """
-    Get all subexpressions in descending order.
+    Get all subexpressions, root first.
 
-    This can be understood as a breadth-first search
-    on an abstract syntax tree from top to bottom.
+    Miasm's ``expr.visit`` walks the tree in post-order (children before
+    parents); reversing that yields a root-first ordering (each node appears
+    before its own descendants). This is NOT a breadth-first traversal -- a
+    node's grandchildren may precede its siblings -- but it does guarantee the
+    full expression comes first and leaves come last.
 
     Args:
         expr: Expr
@@ -195,12 +174,15 @@ def iter_child_expressions(expr: Expr) -> tuple[Expr, ...]:
     using ``expr.graph()`` or recursive visitors. Some simplification candidates
     can become very large after reverse-unification, and graph construction may
     recurse deeply enough to be slow or hit Python recursion limits.
+
+    Repeated siblings are kept (``a + a`` yields ``(a, a)``), so that
+    :func:`bounded_tree_size` counts true expression-tree nodes rather than
+    a structurally-deduplicated graph.
     """
     children = []
 
     def add_child(child: Expr) -> None:
-        if child not in children:
-            children.append(child)
+        children.append(child)
 
     if isinstance(expr, (ExprOp, ExprCompose)):
         for child in expr.args:

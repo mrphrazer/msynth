@@ -173,7 +173,9 @@ def test_simba_returns_shift_unchanged() -> None:
     assert SimbaPass().run(expr) is expr
 
 
-def test_simba_returns_mixed_width_slice_unchanged() -> None:
+def test_simba_returns_slice_atom_unchanged() -> None:
+    # A bare slice is a single BITWISE atom (no width mismatch involved):
+    # it reconstructs to itself, so the pass is a no-op.
     x = ExprId("x", 8)
     expr = ExprSlice(x, 0, 4)
 
@@ -198,14 +200,22 @@ def test_simba_returns_condition_unchanged() -> None:
     assert SimbaPass().run(expr) is expr
 
 
-def test_simba_unsupported_child_does_not_raise() -> None:
-    # ExprCond stays outside the supported fragment, so the classifier
-    # returns None and the pass is a no-op. ExprMem is now a recognised
-    # atom and would no longer trigger this branch on its own.
+def test_simba_atomises_cond_in_linear_combination_soundly() -> None:
+    # Under the atomisation extension (GAMBA 5.5), ExprCond is a
+    # primary atom on the cube, so this ``cond + 1`` expression is
+    # within the linear-MBA fragment and SimbaPass will reconstruct
+    # it. The reconstruction may take a different shape than the
+    # input (e.g. ``-(cond ^ 0xFF)`` instead of ``cond + 1``); the
+    # invariant we pin here is semantic equivalence — Z3 sees no
+    # bit-vector input that distinguishes the two.
     cond = ExprCond(ExprId("c", 1), ExprId("x", 8), ExprId("y", 8))
     expr = ExprOp("+", cond, ExprInt(1, 8))
 
-    assert SimbaPass().run(expr) is expr
+    out = SimbaPass().run(expr)
+    assert _xor_z3_equivalent(expr, out), (
+        f"unsound SimbaPass rewrite over ExprCond atom:\n"
+        f"  source:    {expr}\n  rewritten: {out}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -236,9 +246,20 @@ def _xor_z3_equivalent(left: Expr, right: Expr) -> bool:
     z3_left = translator.from_expr(left)
     z3_right = translator.from_expr(right)
     solver = z3.Solver()
-    solver.set("timeout", 5000)
+    # Generous headroom: the hard 4-var multiply-by-constant corpus query
+    # solves in ~3s unloaded, but a 5s cap flaked under full-suite CPU
+    # contention. A genuine timeout must be a LOUD, distinct error — silently
+    # returning ``unknown == unsat`` (False) would misreport a correct rewrite
+    # as unsound.
+    solver.set("timeout", 30000)
     solver.add(z3_left != z3_right)
-    return solver.check() == z3.unsat
+    result = solver.check()
+    if result == z3.unknown:
+        raise AssertionError(
+            f"Z3 returned unknown within timeout for {left!r} vs {right!r}; "
+            "raise the timeout or move this case to scripts/run_simba_fuzzer.py."
+        )
+    return result == z3.unsat
 
 
 def test_simba_classifier_rejects_xor_of_mixed_with_mixed() -> None:
@@ -322,9 +343,11 @@ def test_simba_classifier_still_accepts_pure_constant_xor() -> None:
 
 
 def test_simba_simplifies_memory_paper_identity() -> None:
-    # The (a & b) + (a | b) == a + b identity carried by a single
-    # memory atom (b == a). Validates that ExprMem participates in the
-    # cube reconstruction, not just that it is named as an atom.
+    # Single-atom case: with b == a == mem, (mem & mem) + (mem | mem)
+    # degenerates to 2*mem. This validates that an ExprMem participates in
+    # the cube reconstruction at all (not the two-operand (a&b)+(a|b)==a+b
+    # identity -- that one needs two distinct atoms and is covered by
+    # test_simba_collapses_memory_andor_sum_to_linear_sum below).
     mem = ExprMem(ExprId("ptr", 8), 8)
     expr = (mem & mem) + (mem | mem)
 
@@ -353,7 +376,8 @@ def test_simba_collapses_memory_andor_sum_to_linear_sum() -> None:
 
     simplified = SimbaPass().run(expr)
     assert_equivalent_atoms(simplified, expr, [a, b])
-    assert node_count(simplified) <= node_count(expr)
+    # (a & b) + (a | b) -> a + b is a strict reduction (5 nodes -> 3)
+    assert node_count(simplified) < node_count(expr)
 
 
 def test_simba_handles_mixed_register_and_memory_mba() -> None:
@@ -444,3 +468,233 @@ def _evaluate_with_atoms(expr: Expr, env: dict[Expr, int]) -> int:
                 result ^= arg
             return result & mask
     raise AssertionError(f"unsupported test expression: {expr!r}")
+
+
+# --- Quine-McCluskey unit tests ---
+
+
+def _qm_reconstruct_table(primes: list[tuple[int, int]], n_vars: int) -> int:
+    """Reconstruct a packed truth table from a list of (value, mask) primes."""
+    table = 0
+    for row in range(1 << n_vars):
+        for value, mask in primes:
+            if (row & ~mask) == (value & ~mask):
+                table |= 1 << row
+                break
+    return table
+
+
+def test_qm_constant_zero():
+    from msynth.simplification.simba import _qm_minimise
+
+    assert _qm_minimise(0, 3) == []
+
+
+def test_qm_constant_one():
+    from msynth.simplification.simba import _qm_minimise
+
+    # All 8 rows of a 3-var function are 1.
+    terms = _qm_minimise(0xFF, 3)
+    assert len(terms) == 1
+    value, mask = terms[0]
+    assert mask == 0b111  # all bits are don't-cares
+
+
+def test_qm_single_variable_x():
+    from msynth.simplification.simba import _qm_minimise
+
+    # f(x, y) = x. Rows where x=1: 1, 3 -> table = 0b1010.
+    terms = _qm_minimise(0b1010, 2)
+    assert len(terms) == 1
+    value, mask = terms[0]
+    # bit 0 (x) is fixed to 1; bit 1 (y) is don't-care.
+    assert mask == 0b10
+    assert value & ~mask == 1
+
+
+def test_qm_xor_two_vars():
+    from msynth.simplification.simba import _qm_minimise
+
+    # f(x, y) = x ^ y. table = 0b0110. Expect 2 terms covering 01 and 10.
+    terms = _qm_minimise(0b0110, 2)
+    assert len(terms) == 2
+    # No combinable pair (each minterm differs from the other in two
+    # bits), so both are single-minterm implicants.
+    covered = {value & ~mask for value, mask in terms}
+    assert covered == {1, 2}
+
+
+def test_qm_and_three_vars():
+    from msynth.simplification.simba import _qm_minimise
+
+    # f(x, y, z) = x & y & z. table = 0b10000000 (only row 7).
+    terms = _qm_minimise(0b10000000, 3)
+    assert len(terms) == 1
+    value, mask = terms[0]
+    assert mask == 0
+    assert value == 0b111
+
+
+def test_qm_or_three_vars():
+    from msynth.simplification.simba import _qm_minimise
+
+    # f(x, y, z) = x | y | z. table = 0b11111110.
+    terms = _qm_minimise(0b11111110, 3)
+    assert len(terms) == 3
+    # Each implicant should fix exactly one literal to 1.
+    for value, mask in terms:
+        fixed_bits = (~mask) & 0b111
+        assert bin(fixed_bits).count("1") == 1
+        assert value & fixed_bits == fixed_bits
+
+
+def test_qm_majority():
+    from msynth.simplification.simba import _qm_minimise
+
+    # majority(x, y, z) = 1 iff at least 2 of (x, y, z) are 1.
+    # Rows with popcount >= 2: 3, 5, 6, 7 -> table = 0b11101000.
+    terms = _qm_minimise(0b11101000, 3)
+    assert len(terms) == 3
+    # Each prime should fix exactly two literals to 1.
+    for value, mask in terms:
+        fixed_bits = (~mask) & 0b111
+        assert bin(fixed_bits).count("1") == 2
+        assert value & fixed_bits == fixed_bits
+
+
+def test_qm_4var_compact():
+    from msynth.simplification.simba import _qm_minimise
+
+    # f(x, y, z, w) = (x & y) | (z & w).
+    # Minterms: rows where (bit0=1 & bit1=1) or (bit2=1 & bit3=1)
+    #   = {3, 7, 11, 12, 13, 14, 15} (7 minterms - DNF would emit 7 terms)
+    # QM should collapse to two prime implicants: (x&y) and (z&w).
+    table = 0
+    for row in [3, 7, 11, 12, 13, 14, 15]:
+        table |= 1 << row
+    terms = _qm_minimise(table, 4)
+    assert len(terms) == 2
+    # The two implicants are (value=0b0011, mask=0b1100) and
+    # (value=0b1100, mask=0b0011).
+    assert set(terms) == {(3, 12), (12, 3)}
+
+
+def test_qm_round_trip():
+    import random
+
+    from msynth.simplification.simba import _qm_minimise
+
+    rng = random.Random(0xC0DE)
+    n_vars = 3
+    rows = 1 << n_vars
+    for _ in range(20):
+        table = rng.randrange(0, 1 << rows)
+        terms = _qm_minimise(table, n_vars)
+        recovered = _qm_reconstruct_table(terms, n_vars)
+        assert recovered == table, (
+            f"QM round-trip mismatch: table=0x{table:X} terms={terms}"
+        )
+
+
+def test_qm_no_redundant_implicants():
+    from msynth.simplification.simba import _qm_minimise
+
+    # AND function: only one prime implicant (the single full-degree term).
+    terms = _qm_minimise(0b10000000, 3)
+    assert len(terms) == 1
+
+
+def test_qm_terms_cover_all_minterms():
+    from msynth.simplification.simba import _qm_minimise
+
+    # Non-trivial 4-variable table; every 1-bit must be covered.
+    table = 0b1011_0101_1100_1001
+    n_vars = 4
+    terms = _qm_minimise(table, n_vars)
+    for row in range(1 << n_vars):
+        if (table >> row) & 1:
+            assert any((row & ~mask) == (value & ~mask) for value, mask in terms), (
+                f"row {row} not covered by any prime implicant"
+            )
+
+
+def test_qm_terms_dont_cover_zero_bits():
+    from msynth.simplification.simba import _qm_minimise
+
+    # Same table; verify no implicant matches a 0-row.
+    table = 0b1011_0101_1100_1001
+    n_vars = 4
+    terms = _qm_minimise(table, n_vars)
+    for row in range(1 << n_vars):
+        if not ((table >> row) & 1):
+            for value, mask in terms:
+                assert (row & ~mask) != (value & ~mask), (
+                    f"prime ({value},{mask}) wrongly covers zero-row {row}"
+                )
+
+
+# --- SimbaPass + QM integration tests ---
+
+
+def test_simba_4var_qm_produces_compact_form():
+    # Sample drawn from cobra.jsonl.gz simba/e1_4vars suite
+    # (case_061916, expected = ``3735936685 * ~x``).
+    import gzip
+    import json
+    from pathlib import Path
+
+    corpus = (
+        Path(__file__).resolve().parents[2] / "datasets" / "corpora" / "cobra.jsonl.gz"
+    )
+    record = None
+    with gzip.open(corpus, "rt") as fh:
+        for line in fh:
+            rec = json.loads(line)
+            if rec["id"] == "case_061916":
+                record = rec
+                break
+    assert record is not None, "expected corpus entry case_061916 not found"
+
+    source = parse_infix_expr(record["expr_text"], size=record["size"])
+    expected = parse_infix_expr(record["expected_text"], size=record["size"])
+    simplified = SimbaPass().run(source)
+
+    # The corpus entry expands a single ``coeff * ~x`` term across many
+    # cube cells; the rewrite should collapse back to roughly the
+    # expected node count (small affine-encoding slack allowed).
+    assert node_count(simplified) <= node_count(expected) + 2
+    assert _xor_z3_equivalent(source, simplified), (
+        f"unsound SimbaPass rewrite of 4-var corpus entry:\n"
+        f"  source:    {source}\n  rewritten: {simplified}"
+    )
+
+
+def test_simba_qm_z3_equivalent():
+    # Three directed cases that exercise the QM fallback inside
+    # _lookup_bitwise_expression. Each is a 3-variable bitwise function
+    # whose truth table is not a single n-ary XOR/AND/OR (so QM is
+    # actually invoked), wrapped in a coefficient to keep it on the
+    # linear-MBA fragment SimbaPass actually rewrites.
+    x = ExprId("x", 8)
+    y = ExprId("y", 8)
+    z = ExprId("z", 8)
+    coeff = ExprInt(7, 8)
+
+    majority = (x & y) | (x & z) | (y & z)
+    case1 = ExprOp("*", coeff, majority)
+    out1 = SimbaPass().run(case1)
+    assert _xor_z3_equivalent(case1, out1), f"unsound: source={case1} rewritten={out1}"
+
+    # f = (x & ~y) | (~x & z)
+    case2 = ExprOp(
+        "*",
+        coeff,
+        (x & (y ^ ExprInt(0xFF, 8))) | ((x ^ ExprInt(0xFF, 8)) & z),
+    )
+    out2 = SimbaPass().run(case2)
+    assert _xor_z3_equivalent(case2, out2), f"unsound: source={case2} rewritten={out2}"
+
+    # f = (x ^ y) | (y ^ z) (3-variable, not a single n-ary AND/OR/XOR)
+    case3 = ExprOp("*", coeff, (x ^ y) | (y ^ z))
+    out3 = SimbaPass().run(case3)
+    assert _xor_z3_equivalent(case3, out3), f"unsound: source={case3} rewritten={out3}"

@@ -1,13 +1,19 @@
-from .preprocessing import (
+from .pipeline import (
     AstNormalizationPass,
-    Preprocessor,
-    default_preprocessor,
+    Pipeline,
+    PipelineMode,
+    default_pipeline,
+    gamba_pipeline,
+    simba_pipeline,
 )
 from .simba import SimbaPass
 
 __all__ = [
     "AstNormalizationPass",
-    "Preprocessor",
+    "Pipeline",
+    "PipelineMode",
     "SimbaPass",
-    "default_preprocessor",
+    "default_pipeline",
+    "gamba_pipeline",
+    "simba_pipeline",
 ]

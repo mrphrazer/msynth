@@ -13,9 +13,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from msynth.parsing import DatasetParseError, ParsedDatasetRow, parse_dataset_line  # noqa: E402
-from msynth.simplification.preprocessing import (  # noqa: E402
+from msynth.simplification.pipeline import (  # noqa: E402
     AstNormalizationPass,
-    Preprocessor,
+    Pipeline,
 )
 from msynth.simplification.simba import SimbaPass  # noqa: E402
 
@@ -47,10 +47,10 @@ def parse_pass_list(value: str) -> tuple[str, ...]:
     return names
 
 
-def build_preprocessor(pass_names: tuple[str, ...]) -> Preprocessor:
+def build_preprocessor(pass_names: tuple[str, ...]) -> Pipeline:
     if pass_names == ("none",):
-        return Preprocessor([])
-    return Preprocessor([PASS_FACTORIES[name]() for name in pass_names])
+        return Pipeline([])
+    return Pipeline([PASS_FACTORIES[name]() for name in pass_names])
 
 
 def iter_dataset_paths(input_path: Path) -> list[Path]:
@@ -88,7 +88,7 @@ def iter_dataset_rows(
 
 def serialize_row(
     row: ParsedDatasetRow,
-    preprocessor: Preprocessor,
+    preprocessor: Pipeline,
     *,
     record_id: str,
     source: str,

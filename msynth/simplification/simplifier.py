@@ -7,14 +7,26 @@ import z3
 from miasm.expression.expression import Expr, ExprId, ExprInt
 from miasm.ir.translators.z3_ir import TranslatorZ3
 
+from msynth.simplification.ast import AbstractSyntaxTreeTranslator
 from msynth.simplification.oracle import SimplificationOracle
-from msynth.simplification.preprocessing import Preprocessor, default_preprocessor
+from msynth.simplification.pipeline import (
+    Pipeline,
+    PipelineMode,
+    default_pipeline,
+    gamba_pipeline,
+    simba_pipeline,
+)
 from msynth.simplification.cegis import CegisSolver, TemplateOracle
 from msynth.simplification.simba import SimbaPass
 from msynth.utils.expr_utils import (
     get_subexpressions,
     get_unique_variables,
     is_strictly_smaller_tree,
+)
+from msynth.simplification.gamba import (
+    GAMBA_POST_REWRITER,
+    GAMBA_PREPROCESSOR,
+    gamba_substitution,
 )
 from msynth.simplification.rewrites import DEFAULT_REWRITER
 from msynth.utils.sampling import has_adversarial_counterexample
@@ -26,60 +38,117 @@ logger = logging.getLogger("msynth.simplifier")
 
 class Simplifier:
     """
-    Expression simplification based on a pre-computed simplification oracle.
+    Expression simplification driven by an oracle, a pipeline, and
+    (optionally) CEGIS-based constant synthesis.
 
-    The Simplifier has access to a pre-computed simplification oracle, stores
-    inputs, evaluates expressions, determines the equivalence class of
-    an expression (based on its input-output behavior) and holds a map
-    of equivalence classes that map a list of expressions with the same
-    I/O behavior.
+    The Simplifier walks an expression top-down and attempts to rewrite
+    each subtree using one of several mechanisms, in this order:
 
-    Based on this oracle, the Simplifier walks over an expression
-    represented as an abstract syntax tree (AST) from the root downwards
-    and tries to simplify subtrees based on oracle-lookups.
+    1. **Pipeline** (top-level, runs once at the start of
+       :meth:`simplify`). Selected via :class:`PipelineMode`; see
+       :mod:`msynth.simplification.pipeline` for the three presets
+       (``AST`` / ``SIMBA`` / ``GAMBA``).
+    2. **Oracle lookup** (per subtree). Looks the subtree up in
+       :class:`SimplificationOracle` by its I/O equivalence class.
+    3. **Subtree-SimBA** (per subtree, on oracle miss). Re-runs SimBA
+       on the subtree alone — useful when the global pipeline's SimBA
+       call rejected the whole expression but an inner subtree is a
+       valid linear MBA. Enabled iff ``pipeline_mode`` runs SimBA at
+       all (SIMBA / GAMBA), and wraps with GAMBA pre/post iff under
+       GAMBA mode.
+    4. **CEGIS** (per subtree, on oracle + SimBA miss). Off by default.
+       Synthesises constants for a fixed family of templates using Z3 —
+       useful for subtrees containing arbitrary constants the oracle
+       cannot cover (e.g. ``v0 * 0xDEADBEEF + 0x1337``).
+    5. **Closing rewriter** (top-level, runs once at the end).
+       :data:`msynth.simplification.rewrites.DEFAULT_REWRITER` applies
+       miasm's ``expr_simp`` plus the two guarded rules (ring
+       normalisation, common-subterm factoring) on the post-substitution
+       AST, catching shapes that became simplifiable only after
+       reverse-unification produced them.
 
-    The approach is inspired by:
-    "QSynth: A Program Synthesis based Approach for Binary Code Deobfuscation" by
-    Robin David, Luigi Coniglio and Mariano Ceccato (NDSS, BAR 2020).
-    Link: https://archive.bar/pdfs/bar2020-preprint9.pdf
+    Three configuration axes — pipeline, oracle, CEGIS — are orthogonal
+    and combine freely. Common configurations:
 
-    Similar to QSynth, the Simplifier replaces already simplified subtrees
-    in the original expression with placeholder variables to reduce
-    the number of variables in too complex expressions. For this, the
-    `_global_variable_prefix` attribute is used.
+    +-------------------------------+-----------------+---------+-------+
+    | What you want                 | pipeline_mode   | oracle  | cegis |
+    +===============================+=================+=========+=======+
+    | Just normalise + apply oracle | ``AST``         | file    | off   |
+    +-------------------------------+-----------------+---------+-------+
+    | Pure SimBA, no oracle         | ``SIMBA``       | empty   | off   |
+    +-------------------------------+-----------------+---------+-------+
+    | GAMBA sandwich on tough MBAs  | ``GAMBA``       | empty   | off   |
+    +-------------------------------+-----------------+---------+-------+
+    | Arbitrary constants per case  | ``SIMBA``/etc.  | any     | on    |
+    +-------------------------------+-----------------+---------+-------+
 
-    The Simplifier applies an SMT-based equivalence check before replacing
-    subexpressions for verification. By default, it uses a pre-configured
-    timeout and applies the replacement if the equivalence has been proven
-    or the timeout is triggered. In case a counter-example has been found,
-    the replacement is withdrawn. For higher confidence, the user can limit
-    replacements to successful equivalence checks (ignoring timeouts).
-    For this, the variable `enforce_equivalence` has to be set and,
-    optionally, the `solver_timeout` to be increased.
+    **Default (``Simplifier()``):** ``pipeline_mode=PipelineMode.AST``,
+    no oracle path (empty in-memory oracle is built automatically), no
+    CEGIS. End-to-end behaviour:
 
+    1. The pipeline (``[AstNormalizationPass]``) binarises the input —
+       the simplifier loop's ``get_subexpressions`` walk requires the
+       binary form to expose intermediate sub-pair nodes.
+    2. The subtree walk runs but every subtree misses: oracle is
+       empty, subtree-SimBA is off (mode=AST), CEGIS is off.
+    3. The closing :data:`DEFAULT_REWRITER` applies miasm's
+       ``expr_simp`` plus ring/factor. This is the only stage that
+       does real simplification work on the default.
+
+    Pick a non-default ``pipeline_mode`` when you want active
+    simplification before the closing rewriter:
+
+    - ``SIMBA`` — adds SimBA reconstruction at the front of the
+      pipeline AND enables the per-subtree SimBA fallback inside the
+      loop.
+    - ``GAMBA`` — same as SIMBA plus wraps both the global SimBA call
+      and the subtree-SimBA fallback with GAMBA's §5.2 algebraic
+      pre/post rewriters.
+
+    **Placeholder substitution.** Inspired by QSynth (David, Coniglio,
+    Ceccato; BAR 2020 — https://archive.bar/pdfs/bar2020-preprint9.pdf),
+    the Simplifier replaces already-simplified subtrees with
+    ``global_reg{N}`` placeholders to reduce variable count in complex
+    expressions; placeholders are reverse-substituted at the end.
+
+    **SMT verification.** Before committing a replacement, the
+    Simplifier checks semantic equivalence with Z3. By default the
+    replacement is committed when Z3 returns UNSAT or hits the
+    ``solver_timeout`` (1s). Setting ``enforce_equivalence=True``
+    requires a proven UNSAT — a timeout is treated as failure.
 
     Attributes:
-        oracle (SimplificationOracle): Pre-computed simplification oracle.
-        enforce_equivalence (bool): Flag to enforce semantic equivalence checks before replacements.
+        oracle (SimplificationOracle): Pre-computed oracle (or
+            :meth:`SimplificationOracle.empty` if ``oracle_path=None``).
+        pipeline (Pipeline): Active simplification pipeline. Determined
+            by ``pipeline_mode`` or by an explicit ``pipeline=``
+            override.
+        enforce_equivalence (bool): Reject candidates on Z3 timeout
+            instead of accepting them.
         solver_timeout (int): SMT solver timeout in seconds.
 
     Private Attributes:
-        _translator_z3 (TranslatorZ3): Translator to translate Miasm IR expressions into Z3 expressions.
-        _solver (Z3Solver): SMT Solver instance.
-        _global_variable_prefix (str): Variable prefix for placeholder variables.
-
-
+        _pipeline_mode (PipelineMode): Mode that selected the pipeline
+            and controls subtree-SimBA wrapping.
+        _subtree_simba_pass (SimbaPass | None): Subtree-level SimBA
+            fallback; ``None`` under AST mode.
+        _cegis_solver (CegisSolver | None): CEGIS solver, lazily built
+            when ``enable_cegis=True``.
+        _translator_z3 (TranslatorZ3): Miasm IR → Z3 translator.
+        _solver (Z3Solver): Z3 solver instance.
+        _global_variable_prefix (str): Prefix for placeholder variables.
     """
 
     def __init__(
         self,
-        oracle_path: Path,
+        oracle_path: Path | None = None,
+        pipeline_mode: PipelineMode = PipelineMode.AST,
+        pipeline: Pipeline | None = None,
         enforce_equivalence: bool = False,
         solver_timeout: int = 1,
-        preprocessor: Preprocessor | None = None,
-        enable_subtree_simba: bool = True,
         subtree_simba_max_vars: int = 5,
         subtree_simba_max_nodes: int = 30,
+        gamba_substitution_max_k: int = 3,
         enable_cegis: bool = False,
         cegis_max_templates: int = 50,
         cegis_timeout: int = 2,
@@ -91,60 +160,101 @@ class Simplifier:
         cegis_expansion_budget: int = 40,
     ):
         """
-        Intializes an instance of Simplifier.
+        Initializes an instance of Simplifier.
 
         Args:
-            oracle_path: File path to pre-computed simplification oracle.
-            enforce_equivalence: Flag to enforce semantic equivalence checks before replacements.
+            oracle_path: Optional file path to a pre-computed simplification
+                oracle. If ``None``, an in-memory empty oracle is used
+                (see :meth:`SimplificationOracle.empty`). The oracle lookup
+                still runs every iteration but always misses — the
+                pipeline + subtree-SiMBA + (optionally) CEGIS path is
+                what produces the simplification in that case.
+            pipeline_mode: Pre-defined pipeline configuration; see
+                :class:`PipelineMode`. ``AST`` (default) does only
+                binarisation; ``SIMBA`` adds SimBA reconstruction and
+                enables subtree-SimBA; ``GAMBA`` wraps SimBA in GAMBA
+                pre/post and enables subtree-SimBA with the same wrap.
+                Ignored when an explicit ``pipeline`` is given.
+            pipeline: Optional explicit pipeline that overrides the
+                preset selected by ``pipeline_mode``. Used by callers
+                that need a custom composition (e.g. inserting a
+                domain-specific pass between SimBA and AstNorm).
+                Subtree-SimBA still tracks ``pipeline_mode``, since the
+                explicit pipeline alone can't tell the simplifier
+                whether subtree-SimBA should fire.
+            enforce_equivalence: Flag to enforce semantic equivalence
+                checks before replacements.
             solver_timeout: SMT solver timeout in seconds.
-            preprocessor: Optional preprocessing pipeline applied before oracle simplification.
-            enable_subtree_simba: Enable SimbaPass as a fallback on oracle misses
-                during the simplification loop. The global SimbaPass in the
-                preprocessing pipeline runs once over the whole expression; this
-                fallback applies it to inner subtrees that the oracle did not
-                match.
-            subtree_simba_max_vars: Skip subtree SiMBA when the unification dict
-                has more than this many terminals.
-            subtree_simba_max_nodes: Skip subtree SiMBA when the Miasm graph of
-                the subtree has more than this many nodes.
+            subtree_simba_max_vars: Skip subtree SiMBA when the unification
+                dict has more than this many terminals.
+            subtree_simba_max_nodes: Skip subtree SiMBA when the Miasm
+                graph of the subtree has more than this many nodes.
+            gamba_substitution_max_k: Maximum ``k`` for the §5.1
+                substitution escalation inside :func:`gamba_substitution`.
+                ``0`` disables escalation (equivalent to plain subtree-
+                SimBA). ``>= 1`` enables abstraction of up to ``k``
+                nonlinear leaves per attempt; combinatorial gating in
+                :func:`_gated_max_k` clips the effective bound based on
+                the leaf count of each subtree. Default ``3`` matches
+                upstream GAMBA's ``simplify_general`` cap.
             enable_cegis: Enable CEGIS constant synthesis as a last-resort
-                fallback on oracle + subtree-SiMBA miss. **Off by default** —
-                the CEGIS path runs Z3 against up to ``cegis_max_templates``
-                templates with a per-template timeout of ``cegis_timeout``
-                seconds, which is non-trivial. Turn on for workloads whose
-                subtrees contain arbitrary constants the precomputed oracle
-                cannot cover (e.g. ``v0 * 0xDEADBEEF + 0x1337``). See
+                fallback on oracle + subtree-SiMBA miss. **Off by default**
+                — the CEGIS path runs Z3 against up to
+                ``cegis_max_templates`` templates with a per-template
+                timeout of ``cegis_timeout`` seconds, which is non-trivial.
+                Turn on for workloads whose subtrees contain arbitrary
+                constants the precomputed oracle cannot cover (e.g.
+                ``v0 * 0xDEADBEEF + 0x1337``). See
                 :mod:`msynth.simplification.cegis` for the algorithm.
             cegis_max_templates: Max templates attempted per subtree.
             cegis_timeout: Per-template Z3 timeout in seconds.
-            cegis_max_variables: Skip CEGIS on subtrees with more than this
-                many unified terminals.
+            cegis_max_variables: Skip CEGIS on subtrees with more than
+                this many unified terminals.
             cegis_runtime_templates: Size of the hand-crafted runtime
                 template oracle generated at construction.
             cegis_refinement_iters: Max counter-example refinement
                 iterations per template attempt.
             cegis_validation_samples: Validation samples per refinement step.
             cegis_expand_templates: When True, wrap base templates with
-                light constant decorations (``+c``, ``^c``, ``(&c)|c'``) to
-                broaden coverage without manual enumeration.
+                light constant decorations (``+c``, ``^c``, ``(&c)|c'``)
+                to broaden coverage without manual enumeration.
             cegis_expansion_budget: Cap on total expanded templates.
         """
         # public attributes
-        self.oracle = SimplificationOracle.load_from_file(oracle_path)
+        self.oracle = (
+            SimplificationOracle.load_from_file(oracle_path)
+            if oracle_path is not None
+            else SimplificationOracle.empty()
+        )
         self.enforce_equivalence = enforce_equivalence
         self.solver_timeout = solver_timeout
-        extra_passes = None if preprocessor is None else preprocessor.passes
-        self.preprocessor = default_preprocessor(extra_passes)
+
+        # Pipeline: explicit override > mode default.
+        if pipeline is not None:
+            self.pipeline = pipeline
+        else:
+            self.pipeline = {
+                PipelineMode.AST: default_pipeline,
+                PipelineMode.SIMBA: simba_pipeline,
+                PipelineMode.GAMBA: gamba_pipeline,
+            }[pipeline_mode]()
 
         # internal attributes
         self._translator_z3 = TranslatorZ3()
         self._solver = z3.Solver()
         self._global_variable_prefix = "global_reg"
+        # Subtree-SimBA tracks the mode: enabled iff the mode runs SimBA
+        # at all. Stored as a flag so _try_subtree_simba can also tell
+        # whether to wrap its SimBA call with GAMBA pre/post.
+        self._pipeline_mode = pipeline_mode
         self._subtree_simba_pass: Optional[SimbaPass] = (
-            SimbaPass() if enable_subtree_simba else None
+            SimbaPass()
+            if pipeline_mode in (PipelineMode.SIMBA, PipelineMode.GAMBA)
+            else None
         )
         self._subtree_simba_max_vars = subtree_simba_max_vars
         self._subtree_simba_max_nodes = subtree_simba_max_nodes
+        self._gamba_substitution_max_k = gamba_substitution_max_k
         # CEGIS solver — built lazily, only when enable_cegis=True, so the
         # off-path costs nothing besides one None check per fallback hop.
         self._cegis_solver: Optional[CegisSolver] = None
@@ -366,20 +476,64 @@ class Simplifier:
         if not self._is_simba_op_candidate(subtree):
             return None
 
-        simplified = self._subtree_simba_pass.run(subtree)
-        if simplified == subtree:
+        # Subtree-SimBA wrapping mirrors the pipeline mode. Under GAMBA
+        # mode the global pipeline wraps SimBA with GAMBA pre/post, so the
+        # subtree-level call wraps too — algebraic structure collapsed on
+        # both sides exposes more linear-MBA shapes to SimBA's classifier
+        # and re-collapses its conjunction-basis output. Under SIMBA mode
+        # the global pipeline doesn't wrap, so the subtree-level call
+        # doesn't either; subtree-SimBA gets the raw subtree.
+        #
+        # The actual SimBA invocation is routed through
+        # :func:`gamba_substitution` (§5.1 wrapper). At ``max_k=0`` the
+        # wrapper degenerates to "plain SimBA on subtree", subsuming the
+        # previous direct call exactly. ``max_k`` will become a tunable in
+        # follow-up work, escalating to the full §5.1 abstraction loop.
+        if self._pipeline_mode == PipelineMode.GAMBA:
+
+            def _simba_fn(arg: Expr) -> Optional[Expr]:
+                preprocessed = GAMBA_PREPROCESSOR.normalize(arg)
+                rewritten = self._subtree_simba_pass.run(preprocessed)
+                if rewritten == preprocessed:
+                    return None
+                return GAMBA_POST_REWRITER.normalize(rewritten)
+        else:
+
+            def _simba_fn(arg: Expr) -> Optional[Expr]:
+                rewritten = self._subtree_simba_pass.run(arg)
+                if rewritten == arg:
+                    return None
+                return rewritten
+
+        # §5.1 escalation budget per subtree. Default ``3`` matches upstream
+        # GAMBA; callers can lower to ``0`` to recover the pre-escalation
+        # subtree-SimBA-only behaviour for measurement purposes.
+        simplified = gamba_substitution(
+            subtree, _simba_fn, max_k=self._gamba_substitution_max_k
+        )
+        if simplified is None:
             return None
-        return simplified
+        # SimBA's reconstruction helpers (_sum, _or, _xor, _conjunction
+        # in simba.py) emit variadic ExprOps. Re-binarise before
+        # returning so the candidate respects the main loop's binary-
+        # tree invariant: ``get_subexpressions`` only exposes
+        # intermediate sub-pair nodes when they physically exist in
+        # the AST, and ``is_strictly_smaller_tree`` compares structural
+        # node counts that differ between variadic and binary shapes.
+        # Without this, a variadic candidate looks artificially smaller
+        # than its binary-shaped equivalent and may bypass the suitability
+        # check on its raw-arity node count.
+        return AbstractSyntaxTreeTranslator().from_expr(simplified)
 
     def _is_suitable_simplification_candidate(
         self, expr: Expr, simplified: Expr
     ) -> bool:
         """
-        Checks if a simplification candidate is not suitable.
+        Checks whether a simplification candidate is suitable to accept.
 
         This check ensures the semantical correctness of the simplification.
-
-        We skip the simplification candiate
+        The candidate is rejected (this method returns ``False``) in any of the
+        following cases:
 
         1. If the simplification candidate contains any unification variable.
            In this case, not every variable of the simplification candidate
@@ -406,11 +560,14 @@ class Simplifier:
             simplified: Simplified expression candidate.
 
         Returns:
-            True if simplification should be skipped, False otherwise.
+            True if the candidate is suitable and should be accepted, False if
+            it should be skipped.
         """
-        # contains placeholder variables
+        # contains placeholder variables (p0, p1, ...): anchored full match so
+        # real variables that merely start with 'p' (e.g. 'ptr') are not
+        # mistaken for unification placeholders.
         if any(
-            [re.search("^p[0-9]*", v.name) for v in get_unique_variables(simplified)]
+            re.fullmatch(r"p[0-9]+", v.name) for v in get_unique_variables(simplified)
         ):
             return False
         # Reject concrete size regressions before doing SMT work. The helper is
@@ -472,68 +629,120 @@ class Simplifier:
 
     def simplify(self, expr: Expr) -> Expr:
         """
-        High-level algorithm to simplify an expression.
+        End-to-end simplification: pipeline → oracle/SimBA/CEGIS loop →
+        closing rewriter.
 
-        Given an expression, we generate an abstract syntax tree (AST)
-        and simplify the AST as follows in a fixpoint iteration:
+        Five phases, in order:
 
-        1. We do a BFS over the AST (top to bottom) and try to simplify
-           the largest possible subtree.
+        1. **Pipeline** (runs once at the top, before any subtree walk).
+           ``self.pipeline.run(expr)`` produces the AST the loop walks
+           over. Under ``PipelineMode.AST`` the only pass is
+           :class:`AstNormalizationPass` (binarisation — required by
+           :func:`get_subexpressions`). Under ``SIMBA`` / ``GAMBA`` the
+           pipeline additionally applies SimBA (and, in GAMBA, the
+           algebraic pre/post rewriters around it). The output is the
+           "preprocessed AST".
 
-        2. For each subtree, we check if its input-output behavior
-           can be represented as an equivalence class that is already
-           contained in the pre-computed oracle. For this, we have to
-           unify the subtree (by replacing terminal nodes with place
-           holder variables), re-apply the unifications to simplification
-           candidates and check if it is suitable.
+        2. **Fixpoint loop.** A BFS walks every subtree of the
+           preprocessed AST top-down. For each subtree we attempt
+           candidates in three tiers (any tier hitting wins):
 
-        3. If a suitable simplification candidate is found, we store it in an
-           dictionary and replace the subtree with a placeholder variable in the
-           AST.
+           a) **Oracle lookup** — gated by
+              ``len(unification_dict) <= self.oracle.num_variables`` so
+              we don't overflow the compiled evaluator's input matrix.
+              The subtree's unified form is keyed by I/O equivalence
+              class and looked up in ``self.oracle.oracle_map``. With
+              the default empty oracle this branch always misses; with
+              a precomputed oracle it carries most of the simplification
+              load.
+           b) **Subtree-SimBA** — re-runs SimBA on the subtree alone.
+              Useful when the global pipeline's SimBA call rejected the
+              whole expression but an inner subtree is a valid linear
+              MBA. Enabled iff the pipeline mode runs SimBA at all
+              (SIMBA / GAMBA); wraps with GAMBA pre/post iff the mode
+              is GAMBA. See :meth:`_try_subtree_simba`.
+           c) **CEGIS** — synthesises constants for a fixed family of
+              templates via Z3. Opt-in (``enable_cegis=True``);
+              recovers shapes whose constants the oracle cannot cover
+              (e.g. ``v0 * 0xDEADBEEF + 0x1337``).
 
-        4. If no more simplifications can be applied, we recursively replace all
-           place holder variables with the simplified subtrees in the AST.
+           If any tier produces a candidate that
+           :meth:`_is_suitable_simplification_candidate` accepts
+           (strictly smaller + Z3-equivalent under
+           ``solver_timeout``), the subtree is replaced with a fresh
+           ``global_reg{N}`` placeholder and the body is recorded in
+           ``global_unification_dict`` for later reverse-substitution.
+           This is the QSynth-inspired placeholder trick: it reduces
+           the variable count of containing subtrees so that later
+           oracle lookups remain within ``oracle.num_variables``.
+
+        3. **Convergence.** The outer ``while`` loop iterates until a
+           full BFS pass produces no replacement (``before == ast``).
+           The placeholder substitution is monotone (subtrees only ever
+           shrink or get replaced), so the fixpoint always terminates.
+
+        4. **Reverse unification.** Each ``global_reg{N}`` is replaced
+           by its recorded body. This can re-introduce shapes the
+           pipeline never saw — for example, an oracle returned
+           ``2 * p1 + 2 * p2`` and ``p1 / p2`` map to bitwise-equivalent
+           subtrees that now sit under a common ``+``.
+
+        5. **Closing rewriter.**
+           :data:`~msynth.simplification.rewrites.DEFAULT_REWRITER`
+           applies miasm's ``expr_simp`` (constant folding, commutative
+           canonicalisation, slice/compose normalisation) plus the two
+           guarded msynth rules (``ring_normalize``,
+           ``factor_common_subterm``). This pass catches shapes that
+           became simplifiable only after step 4 produced them, and is
+           also the only stage that does real simplification work under
+           ``PipelineMode.AST`` with an empty oracle and CEGIS off.
 
         Args:
-            expr: Expression to simplify
+            expr: Expression to simplify.
 
         Returns:
-            Simplified expression
+            Simplified expression, semantically equivalent to ``expr``
+            modulo the configured equivalence-check policy
+            (``enforce_equivalence`` / ``solver_timeout``).
         """
-        # transform expr to the preprocessed abstract syntax tree
-        ast = self.preprocessor.run(expr)
-        # dictionary to map to placeholder variables to simplified subtrees
+        # Phase 1: pipeline. The result is a binarised AST (always, since
+        # every pipeline ends with AstNormalizationPass) plus any
+        # pipeline-mode-specific simplification (SimBA, GAMBA pre/post).
+        ast = self.pipeline.run(expr)
+        # global_reg{N} -> simplified body. Reverse-substituted in
+        # phase 4 after the fixpoint loop terminates.
         global_unification_dict: Dict[Expr, Expr] = {}
-        # placeholder variable counter
         global_ctr = 0
 
-        # fixpoint iteration
+        # Phase 2 + 3: oracle/SimBA/CEGIS fixpoint loop.
         while True:
             before = ast
 
-            # walk over all subtrees
             for subtree in get_subexpressions(ast):
-                # skip subtree if possible
+                # Terminals (ExprId / ExprInt / ExprLoc) have no
+                # substructure to fold; skip the round-trip.
                 if self._skip_subtree(subtree):
                     continue
 
-                # build unification dictionary
+                # Unify terminals to p0, p1, … so equivalence-class
+                # lookups and SimBA/CEGIS templates see a canonical
+                # variable naming.
                 unification_dict = gen_unification_dict(subtree)
 
                 simplified: Optional[Expr] = None
 
-                # The oracle's I/O inputs matrix has self.oracle.num_variables
-                # columns. Subtrees with more unified terminals overflow the
-                # compiled evaluator's index lookup (i[idx] raises IndexError).
-                # Skip the oracle path for those and fall through to subtree
-                # SiMBA / CEGIS, which do their own scaling checks.
+                # Tier (a): oracle lookup.
+                # Gated by self.oracle.num_variables — the oracle's I/O
+                # inputs matrix has that many columns, and subtrees with
+                # more unified terminals would overflow the compiled
+                # evaluator's index lookup (``i[idx]`` IndexError). The
+                # default empty oracle (num_variables=3) still admits
+                # this branch; the contains_equiv_class check just
+                # always misses on an empty oracle_map.
                 if len(unification_dict) <= self.oracle.num_variables:
-                    # determine subtree's equivalence class
                     equiv_class = self.determine_equivalence_class(
                         subtree.replace_expr(unification_dict)
                     )
-
-                    # pre-computed oracle lookup
                     if self.oracle.contains_equiv_class(equiv_class):
                         success, candidate = self._find_suitable_simplification(
                             equiv_class, subtree, unification_dict
@@ -541,7 +750,10 @@ class Simplifier:
                         if success:
                             simplified = candidate
 
-                # subtree-level SiMBA fallback on oracle miss
+                # Tier (b): subtree-level SimBA fallback. Gated by mode
+                # via ``self._subtree_simba_pass is not None`` inside
+                # _try_subtree_simba; under GAMBA mode the call is
+                # additionally wrapped with GAMBA pre/post.
                 if simplified is None:
                     candidate = self._try_subtree_simba(subtree, unification_dict)
                     if (
@@ -552,15 +764,25 @@ class Simplifier:
                     ):
                         simplified = candidate
 
-                # CEGIS constant synthesis on oracle + subtree-SiMBA miss.
-                # Opt-in via enable_cegis; recovers expressions whose shape
-                # matches a template but whose constants are arbitrary and
-                # therefore absent from the precomputed oracle.
+                # Tier (c): CEGIS constant synthesis on oracle +
+                # subtree-SimBA miss. Opt-in via enable_cegis; recovers
+                # expressions whose shape matches a template but whose
+                # constants are arbitrary and therefore absent from the
+                # precomputed oracle.
                 if simplified is None and self._cegis_solver is not None:
                     unified_subtree = subtree.replace_expr(unification_dict)
                     candidate = self._cegis_solver.try_synthesize(
                         subtree, unified_subtree, unification_dict
                     )
+                    if candidate is not None:
+                        # Re-binarise for the same reason as subtree-
+                        # SimBA: CEGIS templates resize and instantiate
+                        # variadic ExprOps. Binary form makes
+                        # ``is_strictly_smaller_tree`` a fair
+                        # structural comparison and keeps the
+                        # placeholder body binary for the final
+                        # post-pass.
+                        candidate = AbstractSyntaxTreeTranslator().from_expr(candidate)
                     if (
                         candidate is not None
                         and self._is_suitable_simplification_candidate(
@@ -569,28 +791,32 @@ class Simplifier:
                     ):
                         simplified = candidate
 
-                # skip if no candidate found
                 if simplified is None:
                     continue
 
-                # generate global placeholder variable
+                # Commit the simplification: substitute the subtree
+                # with a fresh placeholder so later oracle lookups in
+                # containing subtrees stay within
+                # ``oracle.num_variables``.
                 global_variable = self._gen_global_variable_replacement(
                     global_ctr, subtree.size
                 )
                 global_ctr += 1
-
-                # map global placeholder variable to simplified subtree
                 global_unification_dict[global_variable] = simplified
-
-                # replace original subtree with global placeholder variable
                 ast = ast.replace_expr({subtree: global_variable})
+                # Restart the BFS from the top of the (now shrunk)
+                # AST — later subtrees in the current walk may have
+                # disappeared.
                 break
 
-            # check if fixpoint is reached
             if before == ast:
                 break
 
-        # replace global placeholder variables with simplified subtrees in ast
+        # Phase 4: reverse-substitute placeholders with their bodies.
         ast = self._reverse_global_unification(ast, global_unification_dict)
 
+        # Phase 5: closing rewriter (miasm expr_simp + guarded ring /
+        # factor rules). Catches shapes that only became simplifiable
+        # after reverse-substitution exposed common structure across
+        # previously-separate subtrees.
         return DEFAULT_REWRITER.normalize(ast)

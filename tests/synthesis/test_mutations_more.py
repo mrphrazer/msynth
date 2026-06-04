@@ -41,7 +41,8 @@ def test_downcast_expression_applies_mask(monkeypatch) -> None:
 
     grammar = Grammar(8, [p0, p1])
     mutator = Mutator(grammar)
-    mutator.sizes_casting = [0xFF]
+    # a mask strictly narrower than the 8-bit subexpression -> genuine downcast
+    mutator.sizes_casting = [0x0F]
     mutator.mutations.append(mutator.downcast_expression)
 
     state = SynthesisState(expr, {p0: p0, p1: p1})
@@ -54,4 +55,28 @@ def test_downcast_expression_applies_mask(monkeypatch) -> None:
 
     assert isinstance(mutated.expr_ast, ExprOp)
     assert mutated.expr_ast.op == "&"
-    assert mutated.expr_ast.args[1] == ExprInt(0xFF, 8)
+    # the narrower mask is applied, genuinely reducing the value range
+    assert mutated.expr_ast.args[1] == ExprInt(0x0F, 8)
+
+
+def test_downcast_expression_skips_when_no_narrower_mask(monkeypatch) -> None:
+    # A mask equal to the subexpression's full width is a no-op AND, so the
+    # downcast must leave the expression unchanged rather than apply it.
+    p0 = ExprId("p0", 8)
+    p1 = ExprId("p1", 8)
+    expr = ExprOp("+", p0, p1)
+
+    grammar = Grammar(8, [p0, p1])
+    mutator = Mutator(grammar)
+    mutator.sizes_casting = [0xFF]  # == full 8-bit mask, not narrower
+    mutator.mutations.append(mutator.downcast_expression)
+
+    state = SynthesisState(expr, {p0: p0, p1: p1})
+
+    monkeypatch.setattr(mutations_mod, "choice", lambda seq: seq[0])
+    monkeypatch.setattr(mutations_mod, "get_subexpressions", lambda _e: [expr])
+
+    mutated = mutator.downcast_expression(state)
+
+    # unchanged: no spurious "& 0xFF" wrapper
+    assert mutated.expr_ast == expr

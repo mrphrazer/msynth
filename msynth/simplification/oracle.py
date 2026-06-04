@@ -278,15 +278,58 @@ class SimplificationOracle(object):
         replacements = {}
         # walk over unique variables in the expression
         for v in get_unique_variables(expr):
-            # skip if register pattern does not match
-            if not re.search("^p[0-9]*", v.name):
+            # skip non-placeholders; anchored full match so a real variable
+            # that merely starts with 'p' (e.g. 'ptr') is not misread as a
+            # placeholder and fed to int() below.
+            if not re.fullmatch(r"p[0-9]+", v.name):
                 continue
             # calculate index for p
-            index = int(v.name.strip("p"))
+            index = int(v.name[1:])
             # insert into replacements dictionary
             replacements[v] = ExprInt(inputs_array[index], v.size)
 
         return int(expr_simp(expr.replace_expr(replacements)))
+
+    @classmethod
+    def empty(
+        cls, num_variables: int = 3, num_samples: int = 8
+    ) -> "SimplificationOracle":
+        """
+        Build an in-memory empty oracle.
+
+        The returned oracle has an empty ``oracle_map``, so its
+        equivalence-class lookups always miss. The ``inputs`` matrix is
+        still populated and correctly sized so the simplifier's
+        evaluation harness (which feeds inputs to expressions and reads
+        outputs back) does not raise on construction.
+
+        Used when no precomputed equivalence-class table is available —
+        SimBA-only / GAMBA-only / CEGIS-only workflows pass no
+        ``oracle_path`` to :class:`Simplifier`, which then constructs
+        this empty oracle as a uniform stand-in. Centralising the
+        recipe here removes the per-call-site empty-oracle pickle dance
+        that previously littered tests and sweep scripts.
+
+        Args:
+            num_variables: Width of the inputs matrix; defaults to 3 to
+                match the simplifier's typical subtree-unification
+                budget.
+            num_samples: Number of sample rows in the inputs matrix;
+                defaults to 8.
+
+        Returns:
+            A :class:`SimplificationOracle` with an empty oracle_map and
+            a deterministic inputs matrix.
+        """
+        oracle = cls.__new__(cls)
+        oracle.num_variables = num_variables
+        oracle.num_samples = num_samples
+        oracle.inputs = [
+            [(s * 17 + v * 3 + 1) & 0xFF for v in range(num_variables)]
+            for s in range(num_samples)
+        ]
+        oracle.oracle_map = {}
+        return oracle
 
     @staticmethod
     def load_from_file(file_path: Path) -> "SimplificationOracle":

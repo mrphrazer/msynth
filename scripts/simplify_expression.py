@@ -2,7 +2,7 @@ import logging
 import time
 from argparse import ArgumentParser
 from pathlib import Path
-from msynth import Simplifier
+from msynth import PipelineMode, Simplifier
 from miasm.expression.expression import Expr, ExprId, ExprInt
 
 logger = logging.getLogger("msynth")
@@ -113,7 +113,10 @@ def main(oracle_path: Path, expr: Expr) -> None:
     start_time = time.time()
     # init simplification engine
     logger.debug("Initializing simplification engine")
-    simplifier = Simplifier(oracle_path)
+    # SIMBA mode preserves the pre-PipelineMode behaviour (SimBA + subtree
+    # SimBA enabled by default). Use GAMBA mode for §5.2 algebraic
+    # refinement around SimBA, or AST mode if you only want oracle lookups.
+    simplifier = Simplifier(oracle_path, pipeline_mode=PipelineMode.SIMBA)
     logger.info("Simplifying expression")
     # simplify expression
     simplified = simplifier.simplify(expr)
