@@ -542,3 +542,141 @@ def test_cegis_expansion_solves_target_not_in_base_set() -> None:
     candidate = solver.try_synthesize((v0 & mask) + offset, unified, udict)
     assert candidate is not None
     assert _semantically_equivalent(candidate, (v0 & mask) + offset, [v0], seed=23)
+
+
+# ---------------------------------------------------------------------------
+# Solver-correctness suite (added alongside the fast closed-form solvers, the
+# truncated-I/O prefilter and the uniqueness-gated Z3 skips). Every test below
+# confirms that whatever ``try_synthesize`` *returns* is genuinely equivalent
+# to the target -- soundness is the contract, a decline (None) is acceptable.
+# ---------------------------------------------------------------------------
+
+
+def _solver(num_variables: int) -> CegisSolver:
+    oracle = TemplateOracle.gen_runtime_oracle(num_variables=num_variables)
+    return CegisSolver(oracle, max_variables=num_variables)
+
+
+def _try(solver: CegisSolver, expr):
+    udict = gen_unification_dict(expr)
+    return solver.try_synthesize(expr, expr.replace_expr(udict), udict)
+
+
+def test_affine_solver_recovers_multi_coefficient_form() -> None:
+    """``c0*x + c1*y + c2`` (affine in the constants) is solved closed-form."""
+    size = 8
+    v0, v1 = ExprId("v0", size), ExprId("v1", size)
+    expr = v0 * ExprInt(0x4D, size) + v1 * ExprInt(0x71, size) + ExprInt(0x2A, size)
+    cand = _try(_solver(2), expr)
+    assert cand is not None
+    assert _semantically_equivalent(cand, expr, [v0, v1], seed=11, trials=64)
+
+
+def test_bitwise_solver_recovers_mask_or_offset() -> None:
+    """Pure-bitwise ``(x & c0) ^ c1`` solved by the bit-independent solver."""
+    size = 8
+    v0 = ExprId("v0", size)
+    expr = (v0 & ExprInt(0x3C, size)) ^ ExprInt(0x81, size)
+    cand = _try(_solver(1), expr)
+    assert cand is not None
+    assert _exhaustively_equivalent(cand, expr, [v0])
+
+
+def test_bit_serial_solver_handles_multiply_xor() -> None:
+    """``(c0*x) ^ c1`` -- a shape Z3 chokes on at 64-bit -- via Hensel lifting."""
+    size = 8
+    v0 = ExprId("v0", size)
+    expr = (v0 * ExprInt(0x53, size)) ^ ExprInt(0x9A, size)
+    cand = _try(_solver(1), expr)
+    assert cand is not None
+    assert _exhaustively_equivalent(cand, expr, [v0])
+
+
+def test_synthesis_tier_recovers_untemplated_shape() -> None:
+    """A shape with no matching template is recovered by abstracting the
+    target's own constants (the structural-synthesis tier)."""
+    size = 8
+    v0, v1 = ExprId("v0", size), ExprId("v1", size)
+    expr = (v0 & ExprInt(0x6D, size)) - (v1 & ExprInt(0x39, size))
+    cand = _try(_solver(2), expr)
+    assert cand is not None
+    assert _semantically_equivalent(cand, expr, [v0, v1], seed=12, trials=128)
+
+
+def test_masked_constant_is_never_wrongly_accepted() -> None:
+    """``(x & c) & (-x)`` hides ``c``'s bits behind ``x & -x`` (the lowest set
+    bit). The Z3 gate must ensure the returned candidate -- if any -- is truly
+    equivalent, never a sample-consistent but globally wrong constant."""
+    size = 8
+    v0 = ExprId("v0", size)
+    expr = (v0 & ExprInt(0xB5, size)) & ExprOp("-", v0)
+    cand = _try(_solver(1), expr)
+    if cand is not None:
+        assert _exhaustively_equivalent(cand, expr, [v0])
+
+
+def test_skip_gate_soundness_random_battery() -> None:
+    """Randomised correctness battery: synthesise constants for many random
+    constant-bearing expressions and assert every *returned* candidate is
+    exhaustively equivalent. This is the standalone analogue of the benchmark's
+    soundness check and directly exercises the uniqueness-gated Z3 skips."""
+    size = 4  # small enough for a *complete* exhaustive 2-var confirmation
+    rng = random.Random(0xC0FFEE)
+    variables = [ExprId("v0", size), ExprId("v1", size)]
+    arith = ["+", "-", "*"]
+    bitwise = ["&", "|", "^"]
+    mask = (1 << size) - 1
+
+    def leaf():
+        v = rng.choice(variables)
+        if rng.random() < 0.4:
+            return v
+        op = rng.choice(arith + bitwise)
+        k = (rng.getrandbits(size) | (1 if op == "*" else 0)) & mask
+        return ExprOp(op, v, ExprInt(k, size))
+
+    solver = _solver(2)
+    checked = recovered = 0
+    for _ in range(120):
+        op = rng.choice(arith + bitwise)
+        expr = ExprOp(op, leaf(), leaf())
+        cand = _try(solver, expr)
+        checked += 1
+        if cand is not None:
+            recovered += 1
+            assert _exhaustively_equivalent(cand, expr, variables), (
+                f"non-equivalent candidate for {expr}: {cand}"
+            )
+    # Sanity that the battery actually exercised the solver, not just declines.
+    assert recovered >= checked // 2
+
+
+def test_prefilter_does_not_drop_a_valid_match() -> None:
+    """The truncated-I/O prefilter is a *sound* necessary condition: a target
+    whose simplest form is a known template must still be recovered with the
+    filter active (it must never prune the matching template)."""
+    size = 8
+    v0 = ExprId("v0", size)
+    # Obfuscated affine: (p|k)+(p&k) == p+k, with p = c*x. Simplest form is
+    # affine and lives in the template library; reaching it requires the walk,
+    # which is the path the prefilter narrows.
+    p = v0 * ExprInt(0x1D, size)
+    k = ExprInt(0x4C, size)
+    expr = (p | k) + (p & k)
+    solver = _solver(1)
+    cand = _try(solver, expr)
+    assert cand is not None
+    assert _semantically_equivalent(cand, expr, [v0], seed=7, trials=128)
+    # Filter cache is built and the target's own low-bit signature is present.
+    assert solver._walk_cache  # populated by the walk
+
+
+def test_is_low_bits_closed_classification() -> None:
+    """The prefilter's soundness predicate must reject right-shift / divide
+    (which pull high bits down) and accept the closed arithmetic/bitwise ops."""
+    size = 16
+    v0 = ExprId("v0", size)
+    closed = (v0 + ExprInt(3, size)) * (v0 ^ ExprInt(5, size))
+    not_closed = v0 >> ExprInt(2, size)
+    assert CegisSolver._is_low_bits_closed(closed) is True
+    assert CegisSolver._is_low_bits_closed(not_closed) is False

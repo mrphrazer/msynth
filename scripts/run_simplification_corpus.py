@@ -237,6 +237,7 @@ def init_worker(
     solver_timeout: int,
     enforce_equivalence: bool,
     pipeline_mode_name: str,
+    enable_cegis: bool = False,
 ) -> None:
     global _SIMPLIFIER
     # ``oracle_path=None`` (passed when ``--empty-oracle`` is set) constructs
@@ -249,6 +250,7 @@ def init_worker(
         pipeline_mode=PipelineMode[pipeline_mode_name],
         solver_timeout=solver_timeout,
         enforce_equivalence=enforce_equivalence,
+        enable_cegis=enable_cegis,
     )
 
 
@@ -346,6 +348,7 @@ def run_checks(
     fail_fast: bool,
     pipeline_mode_name: str,
     success_metric: str = "passed",
+    enable_cegis: bool = False,
 ) -> list[CheckResult]:
     oracle_arg: str | None = str(oracle_path) if oracle_path is not None else None
 
@@ -355,6 +358,7 @@ def run_checks(
             solver_timeout,
             enforce_equivalence,
             pipeline_mode_name,
+            enable_cegis,
         )
         results = []
         for record in records:
@@ -373,6 +377,7 @@ def run_checks(
             solver_timeout,
             enforce_equivalence,
             pipeline_mode_name,
+            enable_cegis,
         ),
     ) as executor:
         for result in executor.map(check_record, records):
@@ -528,6 +533,15 @@ def parse_args() -> argparse.Namespace:
         help="Require the simplifier's internal Z3 check to prove equivalence.",
     )
     parser.add_argument(
+        "--cegis",
+        action="store_true",
+        help=(
+            "Enable the CEGIS constant-synthesis tier (off by default). Measures "
+            "its marginal contribution on top of the oracle / SiMBA / GAMBA tiers "
+            "(useful e.g. on the gamba/qsynth_ea source)."
+        ),
+    )
+    parser.add_argument(
         "--success-metric",
         choices=SUCCESS_METRICS,
         default="passed",
@@ -604,6 +618,7 @@ def main() -> int:
         fail_fast=args.fail_fast,
         pipeline_mode_name=args.mode,
         success_metric=args.success_metric,
+        enable_cegis=args.cegis,
     )
     elapsed = time.time() - start
 
