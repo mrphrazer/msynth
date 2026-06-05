@@ -809,7 +809,9 @@ class _SimbaSimplifier:
         for arg in self.expr.args:
             if isinstance(arg, ExprOp) and arg.size == self.size:
                 reduced = _SimbaSimplifier(arg, depth=self._depth + 1).simplify()
-                if reduced != arg and _expr_node_count(reduced) <= _expr_node_count(arg):
+                if reduced != arg and _expr_node_count(reduced) <= _expr_node_count(
+                    arg
+                ):
                     new_args.append(reduced)
                     changed = True
                     continue
@@ -957,7 +959,10 @@ class _SimbaSimplifier:
         # expanded ``c + c·f`` (the simplifier's own Z3 equivalence checks rely
         # on this) at a cost of at most one extra node.
         folded = self._fold_constant_into_negation(best)
-        if folded is not None and _expr_node_count(folded) <= _expr_node_count(best) + 1:
+        if (
+            folded is not None
+            and _expr_node_count(folded) <= _expr_node_count(best) + 1
+        ):
             return folded
         return best
 
@@ -983,7 +988,12 @@ class _SimbaSimplifier:
         for index, term in enumerate(expr.args):
             if index == const_index:
                 continue
-            if isinstance(term, ExprOp) and term.op == "*" and len(term.args) == 2 and isinstance(term.args[0], ExprInt):
+            if (
+                isinstance(term, ExprOp)
+                and term.op == "*"
+                and len(term.args) == 2
+                and isinstance(term.args[0], ExprInt)
+            ):
                 coeff = int(term.args[0]) & self.mask
                 base = term.args[1]
             elif isinstance(term, ExprOp) and term.op == "-" and len(term.args) == 1:
@@ -1191,7 +1201,9 @@ class _SimbaSimplifier:
             # All-negative: -(Σ negative).
             inner = negative[0] if len(negative) == 1 else ExprOp("+", *negative)
             return ExprOp("-", inner)
-        positive_combined = positive[0] if len(positive) == 1 else ExprOp("+", *positive)
+        positive_combined = (
+            positive[0] if len(positive) == 1 else ExprOp("+", *positive)
+        )
         return ExprOp("-", positive_combined, *negative_combined)
 
     def _generic_linear_combination(
@@ -1636,7 +1648,9 @@ class _SimbaSimplifier:
     def _validates_local(self, t1: Expr, t2: Expr, folded: Expr) -> bool:
         """Confirm ``t1 + t2 == folded`` on random inputs (soundness guard)."""
         terminals = sorted(
-            _collect_terminals(t1) | _collect_terminals(t2) | _collect_terminals(folded),
+            _collect_terminals(t1)
+            | _collect_terminals(t2)
+            | _collect_terminals(folded),
             key=repr,
         )
         rng = _DeterministicRandom(0x5119BA)

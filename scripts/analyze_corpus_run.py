@@ -66,7 +66,11 @@ def shape_of(row: dict, equivalent) -> str:
         expr = parse_corpus_expression(
             corpus_expr_field(row), encoding=encoding, size=int(row.get("size", 64))
         )
-        return "polynomial" if classify_linear_nonlinear(expr) == "nonlinear" else "linear_big"
+        return (
+            "polynomial"
+            if classify_linear_nonlinear(expr) == "nonlinear"
+            else "linear_big"
+        )
     except Exception:
         return "unknown"
 
@@ -74,12 +78,30 @@ def shape_of(row: dict, equivalent) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--json", type=Path, required=True, help="per-row JSON from a run")
-    ap.add_argument("--corpus", type=Path, default=REPO_ROOT / "datasets" / "corpora" / "cobra.jsonl.gz")
-    ap.add_argument("--suite", type=str, default=None, help="restrict the corpus join to one suite")
+    ap.add_argument(
+        "--corpus",
+        type=Path,
+        default=REPO_ROOT / "datasets" / "corpora" / "cobra.jsonl.gz",
+    )
+    ap.add_argument(
+        "--suite", type=str, default=None, help="restrict the corpus join to one suite"
+    )
     ap.add_argument("--mode", choices=[m.name for m in PipelineMode], default="SIMBA")
-    ap.add_argument("--examples", type=int, default=0, help="re-simplify N uncovered rows per source")
-    ap.add_argument("--shape", type=str, default=None, help="only show examples of this shape")
-    ap.add_argument("--sources", type=str, default=None, help="comma-separated source filter for examples")
+    ap.add_argument(
+        "--examples",
+        type=int,
+        default=0,
+        help="re-simplify N uncovered rows per source",
+    )
+    ap.add_argument(
+        "--shape", type=str, default=None, help="only show examples of this shape"
+    )
+    ap.add_argument(
+        "--sources",
+        type=str,
+        default=None,
+        help="comma-separated source filter for examples",
+    )
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -107,34 +129,56 @@ def main() -> int:
         grand_tot += c["tot"]
         grand_cov += c["covered"]
         extra = " ".join(
-            f"{k}={c[k]}" for k in ("WRONG", "polynomial", "linear_big", "unknown") if c[k]
+            f"{k}={c[k]}"
+            for k in ("WRONG", "polynomial", "linear_big", "unknown")
+            if c[k]
         )
-        print(f"  {src:28s} tot={c['tot']:6d} covered={c['covered']:6d} "
-              f"({100*c['covered']/c['tot']:5.1f}%)  {extra}")
-    print(f"  TOTAL covered {grand_cov}/{grand_tot} = {100*grand_cov/max(1,grand_tot):.2f}%")
+        print(
+            f"  {src:28s} tot={c['tot']:6d} covered={c['covered']:6d} "
+            f"({100 * c['covered'] / c['tot']:5.1f}%)  {extra}"
+        )
+    print(
+        f"  TOTAL covered {grand_cov}/{grand_tot} = {100 * grand_cov / max(1, grand_tot):.2f}%"
+    )
 
     if args.examples > 0:
         rng = random.Random(args.seed)
-        src_filter = {s.strip() for s in args.sources.split(",")} if args.sources else None
-        sim = Simplifier(oracle_path=None, pipeline_mode=PipelineMode[args.mode], enable_cegis=False)
+        src_filter = (
+            {s.strip() for s in args.sources.split(",")} if args.sources else None
+        )
+        sim = Simplifier(
+            oracle_path=None, pipeline_mode=PipelineMode[args.mode], enable_cegis=False
+        )
         print(f"\n=== examples (mode={args.mode}) ===")
         for src in sorted(uncovered_rows):
             if src_filter and src not in src_filter:
                 continue
-            pool = [t for t in uncovered_rows[src] if args.shape is None or t[2] == args.shape]
+            pool = [
+                t
+                for t in uncovered_rows[src]
+                if args.shape is None or t[2] == args.shape
+            ]
             if not pool:
                 continue
-            print(f"\n--- {src} ({len(pool)} uncovered{'' if args.shape is None else ' '+args.shape}) ---")
+            print(
+                f"\n--- {src} ({len(pool)} uncovered{'' if args.shape is None else ' ' + args.shape}) ---"
+            )
             for r, row, shape in rng.sample(pool, min(args.examples, len(pool))):
                 enc = detect_corpus_encoding(row)
                 size = int(row.get("size", 64))
-                e = parse_corpus_expression(corpus_expr_field(row), encoding=enc, size=size)
-                ex = parse_corpus_expression(corpus_expr_field(row, expected=True), encoding=enc, size=size)
+                e = parse_corpus_expression(
+                    corpus_expr_field(row), encoding=enc, size=size
+                )
+                ex = parse_corpus_expression(
+                    corpus_expr_field(row, expected=True), encoding=enc, size=size
+                )
                 out = sim.simplify(e)
-                print(f"  [{shape}] in(n={node_count(e)}) exp(n={node_count(ex)}) our(n={node_count(out)})"
-                      f" eq={r.get('equivalent')}")
+                print(
+                    f"  [{shape}] in(n={node_count(e)}) exp(n={node_count(ex)}) our(n={node_count(out)})"
+                    f" eq={r.get('equivalent')}"
+                )
                 print(f"     in : {row.get('expr_text', corpus_expr_field(row))[:96]}")
-                print(f"     exp: {row.get('expected_text','')[:96]}")
+                print(f"     exp: {row.get('expected_text', '')[:96]}")
                 print(f"     our: {str(out)[:96]}")
     return 0
 

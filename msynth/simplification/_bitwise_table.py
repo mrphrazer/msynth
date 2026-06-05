@@ -246,7 +246,9 @@ def instantiate_recipe(
         return variables[recipe[1]]
     if kind == "not":
         return invert(
-            instantiate_recipe(recipe[1], variables, invert, conjunction, disjunction, xor)
+            instantiate_recipe(
+                recipe[1], variables, invert, conjunction, disjunction, xor
+            )
         )
     a = instantiate_recipe(recipe[1], variables, invert, conjunction, disjunction, xor)
     b = instantiate_recipe(recipe[2], variables, invert, conjunction, disjunction, xor)
