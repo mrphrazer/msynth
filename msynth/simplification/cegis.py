@@ -1493,7 +1493,111 @@ class CegisSolver:
             solved[placeholder] = model.eval(bv, model_completion=True).as_long() & mask
         return solved
 
+    @staticmethod
+    def _is_uniform_width(expr: Expr, size: int) -> bool:
+        """True iff every node of ``expr`` has width ``size`` and no sub-width
+        construct (slice / compose) appears.
+
+        CEGIS's templates, solvers, unification and the ``_resize_expr`` resizer
+        all assume a single uniform bit-width. A sliced terminal (e.g.
+        ``x0[0:8]`` in a 64-bit MBA) unifies to a *sub-width* variable, and
+        resizing that template to the subtree's outer width then builds
+        size-inconsistent ``ExprOp``s. Detecting non-uniform shapes lets CEGIS
+        decline them instead of crashing.
+        """
+        stack = [expr]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ExprSlice, ExprCompose)):
+                return False
+            if node.size != size:
+                return False
+            if isinstance(node, ExprOp):
+                stack.extend(node.args)
+            elif isinstance(node, ExprCond):
+                stack.extend((node.cond, node.src1, node.src2))
+        return True
+
+    def _uniform_unification(self, subtree: Expr) -> Optional[tuple]:
+        """Re-unify ``subtree`` treating width-changing nodes (slice / compose /
+        cond) *and* terminals as atomic variables, yielding a uniform-width
+        target with contiguous ``p0, p1, …``.
+
+        This is the same opaque-sub-expression unification the rest of the
+        simplifier uses: a sub-register access such as ``x0[0:32]`` becomes an
+        independent variable, leaving the surrounding *uniform-width* arithmetic
+        for CEGIS to solve (e.g. an obfuscated ``x0[0:32]*c + k``). Constants
+        (``ExprInt``) are left in place — they are what CEGIS recovers.
+
+        Soundness: freeing a slice into an unconstrained variable makes the
+        equivalence *stricter* (it must hold for every value of the freed
+        variable, not only the values the slice can take), so a candidate that
+        passes can never be wrong; the caller's gate re-checks regardless.
+
+        Returns ``(unified, unification_dict)`` (atom -> ``pN``) or ``None`` when
+        there is nothing to atomize or it exceeds ``max_variables``.
+        """
+        atoms: Dict[Expr, ExprId] = {}
+        had_subword = [False]
+
+        def rec(node: Expr) -> Expr:
+            # Recurse only into *width-preserving* ops; a width-changing op
+            # (a comparison such as ``a == b`` whose 64-bit args yield a 1-bit
+            # result) is atomized as a whole, like a slice/compose/cond.
+            if isinstance(node, ExprOp) and all(
+                arg.size == node.size for arg in node.args
+            ):
+                return ExprOp(node.op, *[rec(arg) for arg in node.args])
+            if isinstance(node, ExprInt):
+                return node
+            # Everything else -- registers, memory, and the width-changing
+            # slice / compose / cond / comparison nodes -- is an atomic variable.
+            if not isinstance(node, ExprId):
+                had_subword[0] = True
+            existing = atoms.get(node)
+            if existing is not None:
+                return existing
+            fresh = ExprId(f"p{len(atoms)}", node.size)
+            atoms[node] = fresh
+            return fresh
+
+        unified = rec(subtree)
+        # Only worthwhile when a width-changer was actually atomized (a plain
+        # terminal re-unification is what the caller already did).
+        if not had_subword[0] or len(atoms) > self.max_variables:
+            return None
+        return unified, {original: pvar for original, pvar in atoms.items()}
+
     def try_synthesize(
+        self,
+        subtree: Expr,
+        unified_subtree: Expr,
+        unification_dict: Dict[Expr, Expr],
+    ) -> Optional[Expr]:
+        """Uniform-width preparation + best-effort wrapper around the solver.
+
+        CEGIS is a fallback tier: it must never crash the simplifier. A
+        mixed-width subtree (slices / composes / sub-register accesses) is first
+        made uniform by re-unifying its width-changing nodes into fresh
+        variables (:meth:`_uniform_unification`); if it still cannot be
+        represented it is declined, and any residual failure is caught and
+        turned into a decline rather than propagated.
+        """
+        if not self._is_uniform_width(unified_subtree, subtree.size):
+            reunified = self._uniform_unification(subtree)
+            if reunified is None:
+                return None
+            unified_subtree, unification_dict = reunified
+            if not self._is_uniform_width(unified_subtree, subtree.size):
+                return None
+        try:
+            return self._try_synthesize_impl(
+                subtree, unified_subtree, unification_dict
+            )
+        except Exception:
+            return None
+
+    def _try_synthesize_impl(
         self,
         subtree: Expr,
         unified_subtree: Expr,

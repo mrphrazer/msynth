@@ -43,9 +43,9 @@ python3 scripts/run_simplification_corpus.py \
 ```
 
 Because every input is obfuscated, the `covered` metric (output equivalent to the
-input *and* no larger than the expected node count) measures whether the pipeline
-recovers the minimal form. The `--cegis` flag isolates the constant solver's
-contribution:
+input *and* no larger than the expected node count, both node-counts taken on the
+canonical binary tree — see `node_count`) measures whether the pipeline recovers
+the minimal form. The `--cegis` flag isolates the constant solver's contribution:
 
 - linear categories (`c*x+k`, `c0*x+c1*y+k`, `c*(x+y)`, `(x&c0)|(y&c1)`) are
   reached by SiMBA/GAMBA alone — the no-CEGIS baseline;
@@ -53,8 +53,8 @@ contribution:
   xor `(c0*x)^(c1*y)`) are structurally outside the linear simplifiers and are
   recovered only with `--cegis`.
 
-On the shipped suite this is **covered 75/120 without CEGIS → 120/120 with CEGIS**
-(`not_equivalent=0`)..
+The 7-category, 105-row suite is **covered 60/105 without CEGIS → 105/105 with
+CEGIS** (`not_equivalent=0`).
 
 ## Real-World Corpus
 
