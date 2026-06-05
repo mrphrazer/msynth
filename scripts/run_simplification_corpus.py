@@ -24,6 +24,7 @@ from msynth.parsing import (  # noqa: E402
     detect_corpus_encoding,
     parse_corpus_expression,
 )
+from msynth.simplification.ast import AbstractSyntaxTreeTranslator  # noqa: E402
 from msynth.simplification.pipeline import PipelineMode  # noqa: E402
 from msynth.simplification.simplifier import Simplifier  # noqa: E402
 from msynth.utils.expr_utils import (  # noqa: E402
@@ -226,10 +227,24 @@ def load_corpus(
 
 
 def node_count(expr: Expr) -> int:
+    """Graph-node count of ``expr`` after canonicalizing to a strict binary tree.
+
+    The binarization is load-bearing for a *fair* size comparison: miasm's
+    ``expr_simp`` emits variadic ``ExprOp`` nodes (``a + b + c`` is one graph
+    node over three leaves) while corpus inputs are binary (``(a + b) + c`` has
+    an extra inner node). Counting raw graph nodes would therefore reward pure
+    re-flattening of a binary input into a variadic output as if it were a real
+    reduction. Binarizing both the input and the simplified output before
+    counting makes the ``covered`` metric representation-independent.
+    """
     try:
-        return len(expr.graph().nodes())
+        canonical = AbstractSyntaxTreeTranslator().from_expr(expr)
     except Exception:
-        return len(get_subexpressions(expr))
+        canonical = expr
+    try:
+        return len(canonical.graph().nodes())
+    except Exception:
+        return len(get_subexpressions(canonical))
 
 
 def init_worker(
@@ -237,6 +252,7 @@ def init_worker(
     solver_timeout: int,
     enforce_equivalence: bool,
     pipeline_mode_name: str,
+    enable_cegis: bool = False,
 ) -> None:
     global _SIMPLIFIER
     # ``oracle_path=None`` (passed when ``--empty-oracle`` is set) constructs
@@ -249,6 +265,7 @@ def init_worker(
         pipeline_mode=PipelineMode[pipeline_mode_name],
         solver_timeout=solver_timeout,
         enforce_equivalence=enforce_equivalence,
+        enable_cegis=enable_cegis,
     )
 
 
@@ -346,6 +363,7 @@ def run_checks(
     fail_fast: bool,
     pipeline_mode_name: str,
     success_metric: str = "passed",
+    enable_cegis: bool = False,
 ) -> list[CheckResult]:
     oracle_arg: str | None = str(oracle_path) if oracle_path is not None else None
 
@@ -355,6 +373,7 @@ def run_checks(
             solver_timeout,
             enforce_equivalence,
             pipeline_mode_name,
+            enable_cegis,
         )
         results = []
         for record in records:
@@ -373,6 +392,7 @@ def run_checks(
             solver_timeout,
             enforce_equivalence,
             pipeline_mode_name,
+            enable_cegis,
         ),
     ) as executor:
         for result in executor.map(check_record, records):
@@ -528,6 +548,15 @@ def parse_args() -> argparse.Namespace:
         help="Require the simplifier's internal Z3 check to prove equivalence.",
     )
     parser.add_argument(
+        "--cegis",
+        action="store_true",
+        help=(
+            "Enable the CEGIS constant-synthesis tier (off by default). Measures "
+            "its marginal contribution on top of the oracle / SiMBA / GAMBA tiers "
+            "(useful e.g. on the gamba/qsynth_ea source)."
+        ),
+    )
+    parser.add_argument(
         "--success-metric",
         choices=SUCCESS_METRICS,
         default="passed",
@@ -570,6 +599,7 @@ def write_json_output(path: Path, results: list[CheckResult]) -> None:
                         "expected_nodes": result.expected_nodes,
                         "equivalent": result.equivalent,
                         "covered": result.covered,
+                        "simplified_repr": result.simplified_repr,
                     }
                 )
                 + "\n"
@@ -604,6 +634,7 @@ def main() -> int:
         fail_fast=args.fail_fast,
         pipeline_mode_name=args.mode,
         success_metric=args.success_metric,
+        enable_cegis=args.cegis,
     )
     elapsed = time.time() - start
 

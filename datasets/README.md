@@ -17,6 +17,44 @@ is a smaller controlled suite for checking stochastic synthesis behavior.
   production obfuscated software.
 - `corpora/synthesis.jsonl.gz`: small hand-written stochastic synthesis corpus
   for checking synthesizer behavior.
+- `corpora/cegis.jsonl.gz`: constant-bearing MBA corpus for the CEGIS
+  constant-synthesis path (see below).
+
+## CEGIS Constant-Synthesis Corpus
+
+Path:
+
+```text
+datasets/corpora/cegis.jsonl.gz
+```
+
+A controlled suite of **obfuscated, equivalent-but-larger** forms of
+constant-bearing expressions, each paired with its minimal constant-bearing
+`expected_miasm` (IR encoding, like the real-world corpus). Each obfuscated input
+is built from its minimal form via exact MBA identities (`a+b = (a^b)+2(a&b)`,
+`a^b = (a|b)-(a&b)`, `a|b = (a^b)+(a&b)`, and expanded products), so the recorded
+ground truth is a true equivalent of a strictly larger input. Evaluated by the
+standard runner:
+
+```text
+python3 scripts/run_simplification_corpus.py \
+    --corpus datasets/corpora/cegis.jsonl.gz --empty-oracle --limit 0 \
+    --success-metric covered [--cegis]
+```
+
+Because every input is obfuscated, the `covered` metric (output equivalent to the
+input *and* no larger than the expected node count, both node-counts taken on the
+canonical binary tree — see `node_count`) measures whether the pipeline recovers
+the minimal form. The `--cegis` flag isolates the constant solver's contribution:
+
+- linear categories (`c*x+k`, `c0*x+c1*y+k`, `c*(x+y)`, `(x&c0)|(y&c1)`) are
+  reached by SiMBA/GAMBA alone — the no-CEGIS baseline;
+- non-linear categories (expanded products `(x+c0)*(y+c1)`, quadratics, multiply-
+  xor `(c0*x)^(c1*y)`) are structurally outside the linear simplifiers and are
+  recovered only with `--cegis`.
+
+The 7-category, 105-row suite is **covered 60/105 without CEGIS → 105/105 with
+CEGIS** (`not_equivalent=0`).
 
 ## Real-World Corpus
 
