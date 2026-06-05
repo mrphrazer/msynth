@@ -115,28 +115,27 @@ class Simplifier:
     | Arbitrary constants per case  | ``SIMBA``/etc.  | any     | on    |
     +-------------------------------+-----------------+---------+-------+
 
-    **Default (``Simplifier()``):** ``pipeline_mode=PipelineMode.AST``,
+    **Default (``Simplifier()``):** ``pipeline_mode=PipelineMode.SIMBA``,
     no oracle path (empty in-memory oracle is built automatically), no
     CEGIS. End-to-end behaviour:
 
-    1. The pipeline (``[AstNormalizationPass]``) binarises the input —
-       the simplifier loop's ``get_subexpressions`` walk requires the
-       binary form to expose intermediate sub-pair nodes.
-    2. The subtree walk runs but every subtree misses: oracle is
-       empty, subtree-SimBA is off (mode=AST), CEGIS is off.
+    1. The pipeline binarises the input (the simplifier loop's
+       ``get_subexpressions`` walk requires the binary form to expose
+       intermediate sub-pair nodes) and runs SimBA reconstruction over
+       the whole expression.
+    2. The subtree walk runs: the oracle is empty (every lookup misses),
+       the per-subtree SimBA fallback is on (mode=SIMBA), CEGIS is off.
     3. The closing :data:`DEFAULT_REWRITER` applies miasm's
-       ``expr_simp`` plus ring/factor. This is the only stage that
-       does real simplification work on the default.
+       ``expr_simp`` plus ring/factor.
 
-    Pick a non-default ``pipeline_mode`` when you want active
-    simplification before the closing rewriter:
+    Pick a non-default ``pipeline_mode`` for a different trade-off:
 
-    - ``SIMBA`` — adds SimBA reconstruction at the front of the
-      pipeline AND enables the per-subtree SimBA fallback inside the
-      loop.
-    - ``GAMBA`` — same as SIMBA plus wraps both the global SimBA call
-      and the subtree-SimBA fallback with GAMBA's §5.2 algebraic
-      pre/post rewriters.
+    - ``AST`` — oracle lookups only: no SimBA reconstruction at the
+      front and no per-subtree SimBA fallback, so the closing rewriter is
+      the only stage doing active work (use with a populated oracle).
+    - ``GAMBA`` — same as the SIMBA default plus wraps both the global
+      SimBA call and the subtree-SimBA fallback with GAMBA's §5.2
+      algebraic pre/post rewriters.
 
     **Placeholder substitution.** Inspired by QSynth (David, Coniglio,
     Ceccato; BAR 2020 — https://archive.bar/pdfs/bar2020-preprint9.pdf),
@@ -175,7 +174,7 @@ class Simplifier:
     def __init__(
         self,
         oracle_path: Path | None = None,
-        pipeline_mode: PipelineMode = PipelineMode.AST,
+        pipeline_mode: PipelineMode = PipelineMode.SIMBA,
         pipeline: Pipeline | None = None,
         enforce_equivalence: bool = False,
         solver_timeout: int = 1,

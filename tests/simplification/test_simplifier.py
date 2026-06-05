@@ -219,10 +219,10 @@ def test_subtree_simba_fallback_simplifies_inner_linear_mba() -> None:
 
 
 def test_ast_mode_leaves_inner_linear_mba_untouched() -> None:
-    # Counterproof for the previous test: under PipelineMode.AST (the
-    # default), subtree-SiMBA is disabled. With no pre-computed oracle
-    # match and no SimBA fallback, the expression must come back
-    # unchanged.
+    # Counterproof for the previous test: under PipelineMode.AST,
+    # subtree-SiMBA is disabled. With no pre-computed oracle match and no
+    # SimBA fallback, the expression must come back unchanged. (AST is no
+    # longer the constructor default, so request it explicitly.)
     size = 64
     x = ExprId("x", size)
     y = ExprId("y", size)
@@ -230,7 +230,7 @@ def test_ast_mode_leaves_inner_linear_mba_untouched() -> None:
     inner = ExprOp("+", ExprOp("&", x, y), ExprOp("|", x, y))
     expr = ExprOp(">>", inner, shift)
 
-    simplifier = Simplifier()
+    simplifier = Simplifier(pipeline_mode=PipelineMode.AST)
     simplified = simplifier.simplify(expr)
 
     assert simplified == expr
@@ -302,8 +302,10 @@ def test_simplifier_demo_mba_reaches_shortest_form_with_placeholder_guard() -> N
     Setup: a 55-node hand-built MBA over three 32-bit variables
     ``v0, v1, v2`` (inlined below; same shape as the demo expression in
     ``scripts/simplify_expression.py``). It expands semantically to
-    ``6*v0 + 6*v1 + 3*v2`` and the simplifier should converge to its
-    *shortest* structural form ``v2*3 + (v0+v1)*6`` (9 graph nodes).
+    ``6*v0 + 6*v1 + 3*v2``. Under the SIMBA default (subtree-SiMBA active)
+    the simplifier converges to that distributed form ``6*v0 + 6*v1 + 3*v2``
+    (10 graph nodes); the even-shorter factored form ``v2*3 + (v0+v1)*6``
+    (9 nodes) is what the oracle-only AST path emits.
 
     Why this test exists: when subtree-SiMBA is allowed to run on subtrees
     whose unification dict contains ``global_reg*`` placeholders left over
@@ -320,8 +322,9 @@ def test_simplifier_demo_mba_reaches_shortest_form_with_placeholder_guard() -> N
 
     The check is therefore two-pronged: assert the result is semantically
     ``6*v0 + 6*v1 + 3*v2`` (via ``expr_simp`` for structural+algebraic
-    normalisation), *and* assert the node count is ≤ 9 so that a future
-    regression of the placeholder guard fails this test rather than
+    normalisation), *and* assert the node count is ≤ 10 so that a future
+    regression of the placeholder guard (which would blow the form up to
+    the 13-node shifted version above) fails this test rather than
     silently degrading the output's compactness.
 
     Marked ``slow`` because it loads the 60MB precomputed oracle; the
@@ -365,7 +368,7 @@ def test_simplifier_demo_mba_reaches_shortest_form_with_placeholder_guard() -> N
         + block_c
     )
 
-    simplifier = Simplifier(_FULL_ORACLE)
+    simplifier = Simplifier(_FULL_ORACLE, pipeline_mode=PipelineMode.SIMBA)
     simplified = simplifier.simplify(expr)
 
     # Semantic check by concrete sampling — robust to the canonical
@@ -394,9 +397,9 @@ def test_simplifier_demo_mba_reaches_shortest_form_with_placeholder_guard() -> N
             f"got {got:#x}, want {want:#x}\n  simplified: {simplified}"
         )
 
-    assert _nodes(simplified) <= 9, (
+    assert _nodes(simplified) <= 10, (
         f"shortest-form regression: got {_nodes(simplified)} nodes, "
-        f"expected ≤ 9; result was {simplified!r}. "
+        f"expected ≤ 10; result was {simplified!r}. "
         "If this fires, the placeholder guard in _try_subtree_simba was "
         "likely removed or weakened — see the comment there."
     )

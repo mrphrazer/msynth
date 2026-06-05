@@ -99,9 +99,14 @@ def test_simba_pipeline_simplifies_linear_mba() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_simplifier_default_pipeline_is_ast_norm_only() -> None:
+def test_simplifier_default_pipeline_is_simba() -> None:
+    # The constructor default is PipelineMode.SIMBA: SimBA reconstruction in
+    # front of the binariser.
     sim = Simplifier()
-    assert [type(p).__name__ for p in sim.pipeline.passes] == ["AstNormalizationPass"]
+    assert [type(p).__name__ for p in sim.pipeline.passes] == [
+        "SimbaPass",
+        "AstNormalizationPass",
+    ]
 
 
 @pytest.mark.parametrize(

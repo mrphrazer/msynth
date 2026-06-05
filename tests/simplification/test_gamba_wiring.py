@@ -234,13 +234,9 @@ def test_subtree_simba_disabled_under_ast_mode() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_default_pipeline_shape_via_simplifier() -> None:
-    # ``Simplifier()`` defaults to ``PipelineMode.AST`` — pure binariser.
-    sim = Simplifier()
-    assert [type(s).__name__ for s in sim.pipeline.passes] == ["AstNormalizationPass"]
-
-
 def test_simba_mode_pipeline_shape_via_simplifier() -> None:
+    # SIMBA is also the constructor default (``Simplifier()`` with no mode);
+    # the "default resolves to SIMBA" assertion lives in test_pipeline.py.
     sim = Simplifier(pipeline_mode=PipelineMode.SIMBA)
     assert [type(s).__name__ for s in sim.pipeline.passes] == [
         "SimbaPass",
