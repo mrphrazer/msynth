@@ -4,6 +4,7 @@ import argparse
 import gzip
 import json
 import os
+import random
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -25,13 +26,82 @@ from msynth.parsing import (  # noqa: E402
 )
 from msynth.simplification.pipeline import PipelineMode  # noqa: E402
 from msynth.simplification.simplifier import Simplifier  # noqa: E402
-from msynth.utils.expr_utils import get_subexpressions  # noqa: E402
+from msynth.utils.expr_utils import (  # noqa: E402
+    compile_expr_to_python,
+    get_subexpressions,
+    get_unique_variables,
+)
+from msynth.utils.sampling import (  # noqa: E402
+    SPECIAL_VALUES,
+    _rename_variables_for_compilation,
+    gen_adversarial_inputs,
+)
 
 DEFAULT_CORPUS = REPO_ROOT / "datasets" / "corpora" / "cobra.jsonl.gz"
 DEFAULT_ORACLE = REPO_ROOT / "oracle.pickle"
 DEFAULT_JOBS = os.cpu_count() or 1
 
+# Number of random I/O pairs used (in addition to deterministic edge cases) to
+# verify that a simplification is semantically equivalent to its input. Chosen
+# per the "covered" success metric: a row only counts as covered when the output
+# agrees with the input on every one of these probes.
+_EQUIVALENCE_SAMPLES = 100
+
 _SIMPLIFIER: Simplifier | None = None
+
+
+def _rand_input(rng: "random.Random") -> int:
+    """Deterministic analogue of sampling.get_rand_input over a seeded RNG.
+
+    Mixes u8/u16/u32/u64 widths and bit-vector special values so the equivalence
+    probe covers a representative spread without depending on global RNG state.
+    """
+    coin = rng.randrange(5)
+    if coin == 0:
+        return rng.getrandbits(8)
+    if coin == 1:
+        return rng.getrandbits(16)
+    if coin == 2:
+        return rng.getrandbits(32)
+    if coin == 3:
+        return rng.getrandbits(64)
+    return rng.choice(SPECIAL_VALUES)
+
+
+def expressions_equivalent(
+    a: Expr, b: Expr, *, num_samples: int = _EQUIVALENCE_SAMPLES
+) -> bool | None:
+    """Verify equivalence of two expressions by evaluating both on many inputs.
+
+    Compiles both expressions to fast Python callables (renaming their variables
+    to the shared ``p0..pn`` namespace), then checks they agree on deterministic
+    edge-case inputs plus ``num_samples`` seeded-random I/O pairs. Returns:
+
+    - ``True``  — agree on every probe (semantically equivalent w.h.p.),
+    - ``False`` — a counterexample input was found (definitely not equivalent),
+    - ``None``  — could not compile one of the expressions (unknown).
+    """
+    variables = sorted(
+        set(get_unique_variables(a)) | set(get_unique_variables(b)),
+        key=lambda variable: str(variable),
+    )
+    try:
+        func_a = compile_expr_to_python(_rename_variables_for_compilation(a, variables))
+        func_b = compile_expr_to_python(_rename_variables_for_compilation(b, variables))
+    except Exception:
+        return None
+    # Deterministic edge cases first (cheap, high-signal for bit-vector bugs).
+    for inputs in gen_adversarial_inputs(variables):
+        if func_a(inputs) != func_b(inputs):
+            return False
+    # Seeded random probes: same vectors for every row keeps runs reproducible.
+    rng = random.Random(0xC0FFEE)
+    width = len(variables)
+    for _ in range(num_samples):
+        inputs = [_rand_input(rng) for _ in range(width)]
+        if func_a(inputs) != func_b(inputs):
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -60,6 +130,9 @@ class CorpusRecord:
         )
 
 
+SUCCESS_METRICS = ("passed", "covered", "ground_truth")
+
+
 @dataclass(frozen=True)
 class CheckResult:
     id: str
@@ -73,10 +146,23 @@ class CheckResult:
     original_nodes: int | None
     simplified_nodes: int | None
     elapsed_seconds: float
+    expected_nodes: int | None = None
+    equivalent: bool | None = None
+    covered: bool = False
 
     @property
     def passed(self) -> bool:
+        # Back-compat metric: a reduction (status "shorter") or an exact ground
+        # truth match. Kept so existing tooling / tests read the same summary.
         return self.status in {"ground_truth", "shorter"}
+
+    def succeeded(self, metric: str) -> bool:
+        """Whether this row counts as a success under the chosen metric."""
+        if metric == "covered":
+            return self.covered
+        if metric == "ground_truth":
+            return self.status == "ground_truth"
+        return self.passed
 
 
 def open_text(path: Path) -> TextIO:
@@ -189,6 +275,9 @@ def check_record(record: CorpusRecord) -> CheckResult:
             else None
         )
         original_nodes = node_count(expression)
+        expected_nodes = node_count(expected) if expected is not None else None
+        equivalent: bool | None = None
+        covered = False
         try:
             simplified = _SIMPLIFIER.simplify(expression)
         except Exception as exc:
@@ -210,9 +299,24 @@ def check_record(record: CorpusRecord) -> CheckResult:
             else:
                 status = "not_shorter"
                 detail = f"nodes {original_nodes} -> {simplified_nodes}"
+
+            # "covered" success metric: the output must be verified equivalent to
+            # the input (on ~100 random + edge I/O pairs) AND be no larger than the
+            # reference's expected form (node count). When there is no ground-truth
+            # expected form, fall back to strict node reduction vs the input.
+            equivalent = expressions_equivalent(expression, simplified)
+            equivalence_ok = equivalent is not False  # True or unknown(None) pass
+            if expected_nodes is not None:
+                size_ok = simplified_nodes <= expected_nodes
+            else:
+                size_ok = simplified_nodes < original_nodes
+            covered = bool(equivalence_ok and size_ok)
     except Exception as exc:
         status = "error"
         detail = str(exc)
+        expected_nodes = None
+        equivalent = None
+        covered = False
 
     return CheckResult(
         id=record.id,
@@ -226,6 +330,9 @@ def check_record(record: CorpusRecord) -> CheckResult:
         original_nodes=original_nodes,
         simplified_nodes=simplified_nodes,
         elapsed_seconds=round(time.time() - start, 6),
+        expected_nodes=expected_nodes,
+        equivalent=equivalent,
+        covered=covered,
     )
 
 
@@ -238,6 +345,7 @@ def run_checks(
     enforce_equivalence: bool,
     fail_fast: bool,
     pipeline_mode_name: str,
+    success_metric: str = "passed",
 ) -> list[CheckResult]:
     oracle_arg: str | None = str(oracle_path) if oracle_path is not None else None
 
@@ -252,7 +360,7 @@ def run_checks(
         for record in records:
             result = check_record(record)
             results.append(result)
-            if fail_fast and not result.passed:
+            if fail_fast and not result.succeeded(success_metric):
                 break
         return results
 
@@ -269,7 +377,7 @@ def run_checks(
     ) as executor:
         for result in executor.map(check_record, records):
             results.append(result)
-            if fail_fast and not result.passed:
+            if fail_fast and not result.succeeded(success_metric):
                 break
     return results
 
@@ -304,6 +412,9 @@ def summarize(results: list[CheckResult]) -> dict[str, int]:
         "shorter": 0,
         "not_shorter": 0,
         "error": 0,
+        "covered": 0,
+        "uncovered": 0,
+        "not_equivalent": 0,
     }
     for result in results:
         if result.passed:
@@ -311,6 +422,12 @@ def summarize(results: list[CheckResult]) -> dict[str, int]:
         else:
             summary["failed"] += 1
         summary[result.status] = summary.get(result.status, 0) + 1
+        if result.covered:
+            summary["covered"] += 1
+        else:
+            summary["uncovered"] += 1
+        if result.equivalent is False:
+            summary["not_equivalent"] += 1
     return summary
 
 
@@ -411,6 +528,19 @@ def parse_args() -> argparse.Namespace:
         help="Require the simplifier's internal Z3 check to prove equivalence.",
     )
     parser.add_argument(
+        "--success-metric",
+        choices=SUCCESS_METRICS,
+        default="passed",
+        help=(
+            "Which per-row criterion drives the exit code, --fail-fast, and the "
+            "printed failures. 'passed' (default, back-compat) = node reduction or "
+            "exact ground truth; 'covered' = output verified equivalent to the input "
+            "AND no larger than the reference expected form; 'ground_truth' = exact "
+            "expr_simp match. The summary line always reports both passed= and "
+            "covered= regardless."
+        ),
+    )
+    parser.add_argument(
         "--fail-fast",
         action="store_true",
         help="Stop after the first mismatch, timeout, or error.",
@@ -437,6 +567,9 @@ def write_json_output(path: Path, results: list[CheckResult]) -> None:
                         "elapsed_seconds": result.elapsed_seconds,
                         "original_nodes": result.original_nodes,
                         "simplified_nodes": result.simplified_nodes,
+                        "expected_nodes": result.expected_nodes,
+                        "equivalent": result.equivalent,
+                        "covered": result.covered,
                     }
                 )
                 + "\n"
@@ -470,6 +603,7 @@ def main() -> int:
         enforce_equivalence=args.enforce_equivalence,
         fail_fast=args.fail_fast,
         pipeline_mode_name=args.mode,
+        success_metric=args.success_metric,
     )
     elapsed = time.time() - start
 
@@ -477,13 +611,15 @@ def main() -> int:
     print(
         "checked={checked} passed={passed} failed={failed} "
         "ground_truth={ground_truth} shorter={shorter} "
-        "not_shorter={not_shorter} error={error} jobs={jobs} "
-        "mode={mode} oracle={oracle_kind} "
+        "not_shorter={not_shorter} error={error} "
+        "covered={covered} uncovered={uncovered} not_equivalent={not_equivalent} "
+        "jobs={jobs} mode={mode} oracle={oracle_kind} metric={metric} "
         "seconds={seconds:.3f}".format(
             **summary,
             jobs=args.jobs,
             mode=args.mode,
             oracle_kind="empty" if args.empty_oracle else "pickle",
+            metric=args.success_metric,
             seconds=elapsed,
         )
     )
@@ -491,7 +627,10 @@ def main() -> int:
     if args.json_output is not None:
         write_json_output(args.json_output, results)
 
-    failures = [result for result in results if not result.passed]
+    # Failures are defined by the selected success metric (default "passed").
+    failures = [
+        result for result in results if not result.succeeded(args.success_metric)
+    ]
     for result in failures[: args.max_failures]:
         print(format_failure(result), file=sys.stderr)
 

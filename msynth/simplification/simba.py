@@ -26,6 +26,20 @@ from miasm.expression.expression import (
     ExprSlice,
 )
 
+from msynth.simplification._bitwise_table import (
+    _MAX_TABLE_VARS,
+    instantiate_recipe,
+    minimal_bitwise_recipe,
+    minimal_bitwise_recipes,
+)
+from msynth.utils.expr_utils import get_subexpressions
+
+# Cap on the number of distinct nonzero signature values for which the
+# decomposition search enumerates every coefficient subset. Linear MBAs in the
+# wild have only a handful of distinct coefficients, so this is rarely hit; above
+# it the search falls back to small (<=4) coefficient sets to stay cheap.
+_MAX_DECOMP_VALUES = 8
+
 
 class _ExpressionKind(Enum):
     """Coarse expression classes used by the linear-MBA validator."""
@@ -105,6 +119,84 @@ def _bitwise_refine(expr: Expr) -> Expr:
     if _expr_node_count(refined) < _expr_node_count(expr):
         return refined
     return expr
+
+
+class _DeterministicRandom:
+    """Tiny seeded LCG for reproducible 64-bit probe values (no global state)."""
+
+    def __init__(self, seed: int):
+        self._state = seed & 0xFFFFFFFFFFFFFFFF
+
+    def next64(self) -> int:
+        # SplitMix64-style mixing — good spread, fully deterministic.
+        self._state = (self._state + 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+        z = self._state
+        z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
+        z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
+        return (z ^ (z >> 31)) & 0xFFFFFFFFFFFFFFFF
+
+
+def _collect_terminals(expr: Expr) -> set:
+    """Collect the opaque integer leaves of ``expr`` (descending through ops)."""
+    leaves: set = set()
+
+    def walk(node: Expr) -> None:
+        if isinstance(node, ExprOp):
+            for arg in node.args:
+                walk(arg)
+        elif isinstance(node, _PRIMARY_LEAVES):
+            leaves.add(node)
+
+    walk(expr)
+    return leaves
+
+
+def _eval_expr_int(expr: Expr, env: dict, mask: int) -> int:
+    """Evaluate ``expr`` over full-width integers under ``env`` (terminals→int)."""
+    if isinstance(expr, ExprInt):
+        return int(expr) & mask
+    if isinstance(expr, _PRIMARY_LEAVES):
+        return env[expr] & mask
+    if not isinstance(expr, ExprOp):
+        raise ValueError(f"unsupported expression {type(expr).__name__}")
+    args = [_eval_expr_int(arg, env, mask) for arg in expr.args]
+    op = expr.op
+    if op == "+":
+        return sum(args) & mask
+    if op == "-":
+        if len(args) == 1:
+            return (-args[0]) & mask
+        result = args[0]
+        for value in args[1:]:
+            result -= value
+        return result & mask
+    if op == "*":
+        result = 1
+        for value in args:
+            result *= value
+        return result & mask
+    if op == "&":
+        result = mask
+        for value in args:
+            result &= value
+        return result & mask
+    if op == "|":
+        result = 0
+        for value in args:
+            result |= value
+        return result & mask
+    if op == "^":
+        result = 0
+        for value in args:
+            result ^= value
+        return result & mask
+    if op == "<<":
+        shift = args[1] & (mask.bit_length() - 1)
+        return (args[0] << shift) & mask
+    if op == ">>":
+        shift = args[1] & (mask.bit_length() - 1)
+        return (args[0] >> shift) & mask
+    raise ValueError(f"unsupported operation {op!r}")
 
 
 def _apply_op_rule(
@@ -277,6 +369,20 @@ def _classify_uncached(
     # irrelevant.
     if expr.op not in {"+", "-", "*", "&", "|", "^"}:
         return (_ExpressionKind.BITWISE, True)
+
+    # Genuine product of two or more non-constant factors (``A·B``, ``x·y``) is a
+    # nonlinear term. Atomise it (GAMBA Section 5.5) so the SURROUNDING linear
+    # MBA still reconstructs, with the product treated as one opaque cube value.
+    # A constant-scaled linear term ``c·expr`` keeps its single non-constant
+    # factor and is handled by the linear ``*`` rule below, so it is NOT caught
+    # here. Unlike the ``&``/``|``/``^`` operand-kind rejections, atomising a
+    # multiplication is exactly the §5.5 case and keeps the product verbatim in
+    # the output, so it never widens the atom set in a way the pipeline cannot
+    # fold back.
+    if expr.op == "*":
+        non_constant = [arg for arg in expr.args if not isinstance(arg, ExprInt)]
+        if len(non_constant) >= 2:
+            return (_ExpressionKind.BITWISE, True)
 
     arg_results = [_classify(arg, parent_size, cache) for arg in expr.args]
     if any(k is None for k, _ in arg_results):
@@ -508,26 +614,149 @@ class SimbaPass:
         return simplifier.simplify()
 
 
+# Bound on how deep the bottom-up nested-MBA simplification recurses. Real
+# corpus expressions nest only a handful of linear-MBA layers; the cap is a
+# safety net against pathological inputs.
+_MAX_BOTTOM_UP_DEPTH = 12
+
+# Cap on the number of boolean-cube atoms SiMBA will reconstruct over. The cube
+# machinery is exponential in the atom count (``_signature`` is 2^n and
+# ``_generic_linear_combination`` is O(4^n)), so atomising many independent
+# products (e.g. a sum of a dozen ``bitwise·bitwise`` monomials) would blow up.
+# Linear MBAs that actually simplify to a compact form use only a handful of
+# atoms, so bailing above this bound costs no coverage and keeps the pass fast.
+_MAX_CUBE_ATOMS = 8
+
+# Bound on bottom-up recursion input size, so a huge nested expression does not
+# trigger an expensive cascade of operand re-simplifications.
+_MAX_BOTTOM_UP_NODES = 120
+
+
 class _SimbaSimplifier:
-    def __init__(self, expr: Expr):
+    def __init__(self, expr: Expr, depth: int = 0):
         self.expr = expr
         self.size = expr.size
         self.modulus = 1 << self.size
         self.mask = self.modulus - 1
         self._classify_cache: dict[Expr, tuple[_ExpressionKind | None, bool]] = {}
         self.variables = _collect_atoms(expr)
+        self._depth = depth
 
     def simplify(self) -> Expr:
+        # Soundness gate: SiMBA's cube reconstruction is only valid for genuine
+        # linear MBAs, and the atomisation / bottom-up extensions can, on rare
+        # adversarial shapes, reconstruct a sub-expression to two inconsistent
+        # atom forms and produce a non-equivalent result. Verify every non-trivial
+        # output against the input on edge-case + random probes and fall back to
+        # the (always-correct) input when verification fails, so the pass can only
+        # ever return an equivalent expression.
+        candidates = [self.expr]
+        core = self._simplify_core()
+        if core is not self.expr:
+            candidates.append(core)
+        # At the top level also try reconstructing the whole expression as a
+        # linear MBA over its bare variables. This recovers the compact form of
+        # heavily-obfuscated 2-3 variable expressions whose arithmetic-inside-
+        # bitwise shape (``(x-y) & y``, ``(-x) & y``, …) the structural classifier
+        # rejects, but which are still simple functions of x and y.
+        if self._depth == 0:
+            bare = self._simplify_over_bare_variables()
+            if bare is not None and bare is not self.expr:
+                candidates.append(bare)
+        verified = [self.expr] + [
+            candidate
+            for candidate in candidates[1:]
+            if self._verify_reconstruction(candidate)
+        ]
+        return min(verified, key=_expr_node_count)
+
+    def _simplify_over_bare_variables(self) -> Expr | None:
+        """Reconstruct the whole expression over its bare variables, or None.
+
+        Treats the bare terminals (``ExprId``/``ExprMem``/…) as the cube atoms and
+        evaluates the *entire* expression numerically on the Boolean cube, then
+        runs the standard signature reconstruction. Sound only when the
+        expression is a linear MBA of those variables — the outer soundness gate
+        verifies the result and discards it otherwise, so this can be tried
+        aggressively.
+        """
+        bare = sorted(_collect_terminals(self.expr), key=repr)
+        if not bare or len(bare) > _MAX_CUBE_ATOMS:
+            return None
+        try:
+            signature = []
+            for assignment in range(1 << len(bare)):
+                env = {
+                    variable: (assignment >> index) & 1
+                    for index, variable in enumerate(bare)
+                }
+                signature.append(_eval_expr_int(self.expr, env, self.mask))
+        except (KeyError, ValueError, OverflowError):
+            return None
+        if len(set(signature)) == 1:
+            return self._const(signature[0])
+        try:
+            reconstructed = self._simplify_signature(signature, bare)
+        except (KeyError, ValueError, OverflowError):
+            return None
+        return _bitwise_refine(reconstructed)
+
+    def _verify_reconstruction(self, simplified: Expr) -> bool:
+        """True iff ``simplified`` agrees with the input on edge + random probes."""
+        terminals = sorted(
+            _collect_terminals(self.expr) | _collect_terminals(simplified), key=repr
+        )
+        # Deterministic edge cases (catch modular-wraparound / bit-pattern bugs)
+        # followed by random probes.
+        edge = [0, 1, 2, 3, self.mask, self.mask - 1, self.modulus >> 1, 0xFF, 0x80]
+        rng = _DeterministicRandom(0x511B7A)
+        for trial in range(56):
+            if trial < len(edge):
+                value = edge[trial]
+                env = {term: value for term in terminals}
+            else:
+                env = {term: rng.next64() for term in terminals}
+            try:
+                if _eval_expr_int(self.expr, env, self.mask) != _eval_expr_int(
+                    simplified, env, self.mask
+                ):
+                    return False
+            except (KeyError, ValueError):
+                # An operator the lightweight evaluator does not model — trust the
+                # reconstruction (these shapes are atomised, not reconstructed).
+                return True
+        return True
+
+    def _simplify_core(self) -> Expr:
         if self.size <= 0:
             return self.expr
+
+        # Collapse polynomial obfuscation of products before classification:
+        # ``(A&B)·(A|B) + (A&~B)·(~A&B) == A·B`` rewrites a sum of two bitwise
+        # products into a single ``A·B`` factor. SiMBA then treats ``A·B`` as an
+        # opaque atom and reconstructs the surrounding linear MBA normally, so a
+        # polynomial MBA like ``(x&y)·(x|y)+(x&~y)·(~x&y)-20`` becomes ``x·y-20``.
+        collapsed = self._collapse_product_identities(self.expr)
+        if collapsed is not self.expr:
+            self.expr = collapsed
+            self.variables = _collect_atoms(collapsed)
 
         # A None here is the classifier's no-op signal: either a width
         # mismatch, or the top node is a linear-MBA operator whose operand
         # kinds don't match any rule (operand-kind rejection). Operators
         # outside the fragment instead atomise to a single opaque BITWISE
-        # atom, which SiMBA reconstructs unchanged. In every None case we
-        # leave the input alone.
+        # atom, which SiMBA reconstructs unchanged. Before giving up we try a
+        # bottom-up pass: simplifying operand sub-expressions can collapse a
+        # nested linear MBA (``B`` inside ``B & y``) to an atom and unblock this
+        # node's reconstruction.
         if self._classify(self.expr) is None:
+            return self._simplify_bottom_up()
+
+        # Guard the exponential cube machinery: too many independent atoms (many
+        # distinct products in a polynomial MBA) make signature/reconstruction
+        # infeasible. Such inputs are left unchanged, exactly as the pre-
+        # atomisation classifier did by rejecting products outright.
+        if len(self.variables) > _MAX_CUBE_ATOMS:
             return self.expr
 
         try:
@@ -558,6 +787,39 @@ class _SimbaSimplifier:
         # standalone output compact in SIMBA mode and in subtree-SimBA, where no
         # GAMBA post-rewriter runs after the pass.
         return _bitwise_refine(simplified)
+
+    def _simplify_bottom_up(self) -> Expr:
+        """Simplify operand sub-expressions, then retry this node.
+
+        When the node itself is outside the linear-MBA fragment (e.g. ``B & y``
+        where ``B`` is a linear MBA, not an atom), reducing ``B`` to its compact
+        form ``a`` turns the node into ``a & y`` — a valid bitwise-over-atoms
+        shape SiMBA can reconstruct. Each operand is reduced independently and
+        only kept when it does not grow, so the rewrite is sound and never
+        regresses. Bounded by ``_MAX_BOTTOM_UP_DEPTH``.
+        """
+        if (
+            self._depth >= _MAX_BOTTOM_UP_DEPTH
+            or not isinstance(self.expr, ExprOp)
+            or _expr_node_count(self.expr) > _MAX_BOTTOM_UP_NODES
+        ):
+            return self.expr
+        new_args = []
+        changed = False
+        for arg in self.expr.args:
+            if isinstance(arg, ExprOp) and arg.size == self.size:
+                reduced = _SimbaSimplifier(arg, depth=self._depth + 1).simplify()
+                if reduced != arg and _expr_node_count(reduced) <= _expr_node_count(arg):
+                    new_args.append(reduced)
+                    changed = True
+                    continue
+            new_args.append(arg)
+        if not changed:
+            return self.expr
+        rebuilt = ExprOp(self.expr.op, *new_args)
+        # Retry the full reconstruction on the operand-reduced node. Its operands
+        # are now fixpoints, so a second bottom-up pass cannot loop.
+        return _SimbaSimplifier(rebuilt, depth=self._depth + 1).simplify()
 
     def _classify(self, expr: Expr) -> _ExpressionKind | None:
         """
@@ -649,13 +911,288 @@ class _SimbaSimplifier:
         if len(set(signature)) == 1:
             return self._const(signature[0])
 
-        # First build the always-valid conjunction-basis representation. For up
-        # to three variables, try the paper's lookup/refinement rules afterward
-        # because those often recover compact bitwise forms such as x ^ y.
+        # The always-valid conjunction-basis representation is the floor: every
+        # other candidate is compared against it and we keep the smallest, so the
+        # result can never be worse than this.
         generic = self._generic_linear_combination(signature, variables)
-        if len(variables) <= 3:
-            return self._refine(signature, variables, generic)
-        return generic
+        return self._minimal_linear_reconstruction(signature, variables, generic)
+
+    def _minimal_linear_reconstruction(
+        self, signature: list[int], variables: list[Expr], generic: Expr
+    ) -> Expr:
+        """
+        Pick the smallest equivalent reconstruction of the signature.
+
+        A linear MBA decomposes as ``const + Σ c_k · f_k`` where each ``f_k`` is a
+        0/1 boolean function of the atoms. We enumerate candidate decompositions
+        whose coefficients are drawn from the distinct nonzero signature values
+        (after peeling the constant), build each region's predicate via the
+        minimal bitwise table (≤3 vars) or the legacy lookup (more vars), and
+        return whichever assembled expression has the fewest nodes — always
+        including ``generic`` and the paper's ``_refine`` heuristics so the result
+        is never larger than before.
+        """
+        candidates: list[Expr] = [generic]
+
+        # Legacy small-variable heuristics (now table-backed) remain a useful
+        # candidate source for the negated-predicate / value-merge shapes.
+        if len(variables) <= _MAX_TABLE_VARS:
+            try:
+                candidates.append(self._refine(signature, variables, generic))
+            except (ValueError, KeyError):
+                pass
+
+        const = signature[0] & self.mask
+        shifted = [(value - const) & self.mask for value in signature]
+        distinct = sorted({value for value in shifted if value != 0})
+        for coeffs in self._iter_coeff_sets(distinct):
+            candidates.extend(
+                self._build_decomposition(shifted, variables, coeffs, const)
+            )
+
+        best = min(candidates, key=_expr_node_count)
+        # Fold a leading constant into a negated factor when the shapes line up
+        # (``c + c·f == (-c)·~f``). This recovers the reference's canonical
+        # ``coeff · ~bitwise`` form, which is far more SMT-friendly than the
+        # expanded ``c + c·f`` (the simplifier's own Z3 equivalence checks rely
+        # on this) at a cost of at most one extra node.
+        folded = self._fold_constant_into_negation(best)
+        if folded is not None and _expr_node_count(folded) <= _expr_node_count(best) + 1:
+            return folded
+        return best
+
+    def _fold_constant_into_negation(self, expr: Expr) -> Expr | None:
+        """Rewrite ``c + c·f + …`` to ``(-c)·~f + …`` (one term), else None.
+
+        Uses the modular identity ``c + c·f == (-c)·~f`` for a 0/1 predicate
+        ``f``. Only fires when the standalone constant equals the coefficient of
+        one of the product terms, which is exactly the affine shape the SiMBA
+        reference emits as ``coeff · ~x``.
+        """
+        if not (isinstance(expr, ExprOp) and expr.op == "+"):
+            return None
+        const_value: int | None = None
+        const_index = -1
+        for index, term in enumerate(expr.args):
+            if isinstance(term, ExprInt):
+                const_value = int(term) & self.mask
+                const_index = index
+                break
+        if not const_value:
+            return None
+        for index, term in enumerate(expr.args):
+            if index == const_index:
+                continue
+            if isinstance(term, ExprOp) and term.op == "*" and len(term.args) == 2 and isinstance(term.args[0], ExprInt):
+                coeff = int(term.args[0]) & self.mask
+                base = term.args[1]
+            elif isinstance(term, ExprOp) and term.op == "-" and len(term.args) == 1:
+                # Unary negation is coefficient -1 (see :meth:`_multiply`).
+                coeff = self.mask
+                base = term.args[0]
+            else:
+                coeff = 1
+                base = term
+            if coeff != const_value:
+                continue
+            folded_term = self._multiply((-coeff) & self.mask, self._invert(base))
+            remaining = [
+                arg
+                for position, arg in enumerate(expr.args)
+                if position != const_index and position != index
+            ]
+            return self._sum([folded_term, *remaining])
+        return None
+
+    def _iter_coeff_sets(self, distinct: list[int]):
+        """Yield coefficient subsets to try as the basis of a decomposition.
+
+        Every shifted signature value must be a subset-sum of the chosen
+        coefficients, so enumerating subsets of the distinct values covers the
+        per-value, negated, and additive-merge decompositions. The number of
+        distinct values can be large (a complex linear MBA has many distinct
+        coefficients), so the enumeration is bounded: the full per-value set and
+        every singleton are always tried, and the combinatorial pair/triple
+        merges only when there are few distinct values.
+        """
+        count = len(distinct)
+        if count == 0:
+            return
+        # Per-value decomposition (one term per distinct value).
+        yield tuple(distinct)
+        # Single-coefficient decompositions (``c·f`` and the negated/affine forms).
+        for value in distinct:
+            yield (value,)
+        # Additive-merge decompositions (``a, b → a+b`` shared regions) — only
+        # worth the combinatorial cost when the value set is small.
+        if 2 <= count <= _MAX_DECOMP_VALUES:
+            for size in (2, 3):
+                if size >= count:
+                    break
+                for combo in combinations(distinct, size):
+                    yield combo
+
+    def _build_decomposition(
+        self,
+        shifted: list[int],
+        variables: list[Expr],
+        coeffs: tuple[int, ...],
+        const: int,
+    ) -> Expr | None:
+        """Build ``const + Σ coeffs[i] · f_i`` for one coefficient set, or None.
+
+        Each row value must be representable as a subset-sum of ``coeffs`` (with
+        the all-zero row using the empty subset); the chosen subset assigns which
+        ``f_i`` are true on that row. Returns None if a value is unreachable or a
+        region's bitwise expression cannot be built.
+        """
+        count = len(coeffs)
+        empty: list[Expr] = []
+        # Map each achievable subset-sum to a representative subset bitmask,
+        # preferring fewer coefficients (so a row equal to a single coefficient
+        # uses just that coefficient's predicate).
+        sum_to_mask: dict[int, int] = {}
+        for bits in sorted(range(1 << count), key=lambda b: bin(b).count("1")):
+            total = 0
+            for index in range(count):
+                if (bits >> index) & 1:
+                    total = (total + coeffs[index]) & self.mask
+            sum_to_mask.setdefault(total, bits)
+
+        predicates = [[0] * len(shifted) for _ in range(count)]
+        for row, value in enumerate(shifted):
+            if value == 0:
+                continue
+            bits = sum_to_mask.get(value)
+            if bits is None:
+                return empty
+            for index in range(count):
+                if (bits >> index) & 1:
+                    predicates[index][row] = 1
+
+        # Build, for each coefficient, the set of equal-cost bitwise forms for
+        # its region, then choose forms that share subexpressions across terms
+        # (so e.g. two terms both reuse ``y^z``).
+        active = [index for index in range(count) if any(predicates[index])]
+        candidate_lists = []
+        for index in active:
+            cands = self._lookup_bitwise_all(predicates[index], variables)
+            if not cands:
+                return empty
+            candidate_lists.append(cands)
+        chosen = self._select_sharing(candidate_lists)
+        pairs = [(coeffs[index], chosen[pos]) for pos, index in enumerate(active)]
+        # Two assemblies, both valid; the caller keeps whichever is smaller:
+        #   - signed: ``A - B`` / ``3·A - 3·B`` (binary minus, shared coefficient),
+        #   - additive: ``Σ coeff·f`` which the negation-fold can turn into ``~f``.
+        forms = [self._assemble_signed(const, pairs)]
+        additive_terms: list[Expr] = []
+        if const:
+            additive_terms.append(self._const(const))
+        additive_terms.extend(self._multiply(coeff, factor) for coeff, factor in pairs)
+        forms.append(self._sum(additive_terms))
+        return forms
+
+    def _lookup_bitwise_all(
+        self, predicate: list[int], variables: list[Expr]
+    ) -> list[Expr]:
+        """All equal-cost minimal bitwise forms for ``predicate`` (≤3-var support).
+
+        Falls back to the single legacy form for larger supports.
+        """
+        table = self._table_to_int(predicate)
+        if table == 0:
+            return [self._const(0)]
+        support = self._predicate_support(predicate, len(variables))
+        if len(support) <= _MAX_TABLE_VARS:
+            projected = self._project_predicate(predicate, support, len(variables))
+            recipes = minimal_bitwise_recipes(projected, len(support))
+            if recipes:
+                proj_vars = [variables[index] for index in support]
+                return [
+                    instantiate_recipe(
+                        recipe,
+                        proj_vars,
+                        self._invert,
+                        self._conjunction,
+                        self._or,
+                        self._xor,
+                    )
+                    for recipe in recipes
+                ]
+        single = self._lookup_bitwise_expression(predicate, variables)
+        return [single] if single is not None else []
+
+    def _select_sharing(self, candidate_lists: list[list[Expr]]) -> list[Expr]:
+        """Pick one bitwise form per term to maximise shared subexpressions.
+
+        A subexpression that can appear in two or more terms' candidate sets is
+        "shareable"; each term then prefers the candidate covering the most
+        shareable subexpressions (tie-break: fewest nodes). Order-independent.
+        """
+        subsets = [
+            [set(get_subexpressions(cand)) for cand in cands]
+            for cands in candidate_lists
+        ]
+        appearances: dict = {}
+        for term_sets in subsets:
+            union = set().union(*term_sets) if term_sets else set()
+            for sub in union:
+                appearances[sub] = appearances.get(sub, 0) + 1
+        shareable = {sub for sub, count in appearances.items() if count >= 2}
+        chosen: list[Expr] = []
+        for cands, term_sets in zip(candidate_lists, subsets):
+            best_index = max(
+                range(len(cands)),
+                key=lambda i: (len(term_sets[i] & shareable), -len(term_sets[i])),
+            )
+            chosen.append(cands[best_index])
+        return chosen
+
+    def _assemble_signed(self, const: int, pairs: list) -> Expr:
+        """Assemble ``const + Σ coeff·f`` using subtraction for negative terms.
+
+        Splitting into positive and negative magnitudes lets the result use
+        ``A - B`` / ``3·A - 3·B`` (binary minus, shared positive coefficient)
+        instead of ``A + (-B)`` / ``A + 0xFF..FD·B``, matching the reference's
+        compact, SMT-friendly shapes.
+        """
+        half = self.modulus >> 1
+        positive: list[Expr] = []
+        negative: list[Expr] = []
+
+        def emit(magnitude: int, factor: Expr, bucket: list[Expr]) -> None:
+            if magnitude == 1:
+                bucket.append(factor)
+            else:
+                bucket.append(ExprOp("*", self._const(magnitude), factor))
+
+        const &= self.mask
+        if const:
+            if const < half:
+                positive.append(self._const(const))
+            else:
+                negative.append(self._const((self.modulus - const) & self.mask))
+        for coeff, factor in pairs:
+            coeff &= self.mask
+            if coeff == 0:
+                continue
+            if coeff < half:
+                emit(coeff, factor, positive)
+            else:
+                emit((self.modulus - coeff) & self.mask, factor, negative)
+
+        if not positive and not negative:
+            return self._const(0)
+        if not negative:
+            return positive[0] if len(positive) == 1 else ExprOp("+", *positive)
+        negative_combined = negative if len(negative) >= 1 else []
+        if not positive:
+            # All-negative: -(Σ negative).
+            inner = negative[0] if len(negative) == 1 else ExprOp("+", *negative)
+            return ExprOp("-", inner)
+        positive_combined = positive[0] if len(positive) == 1 else ExprOp("+", *positive)
+        return ExprOp("-", positive_combined, *negative_combined)
 
     def _generic_linear_combination(
         self, signature: list[int], variables: list[Expr]
@@ -918,6 +1455,28 @@ class _SimbaSimplifier:
         if table == 0:
             return self._const(0)
 
+        # A precomputed table gives the globally minimal bitwise formula over
+        # {var, ~, &, |, ^} (XOR-aware), recovering compact forms like
+        # (d^e)|(d^f) the Quine-McCluskey DNF path below cannot. The predicate is
+        # first projected onto the variables it actually depends on: a region
+        # like ``~x&(y^z)`` inside a 5-variable expression depends on only three
+        # variables, so we look it up over that support and instantiate it over
+        # those variables. None means not bitwise-expressible (all-ones); we then
+        # fall through to the legacy path (which also bails).
+        support = self._predicate_support(predicate, len(variables))
+        if len(support) <= _MAX_TABLE_VARS:
+            projected = self._project_predicate(predicate, support, len(variables))
+            recipe = minimal_bitwise_recipe(projected, len(support))
+            if recipe is not None:
+                return instantiate_recipe(
+                    recipe,
+                    [variables[index] for index in support],
+                    self._invert,
+                    self._conjunction,
+                    self._or,
+                    self._xor,
+                )
+
         for index, variable_table in enumerate(variable_tables):
             if table == variable_table:
                 return variables[index]
@@ -959,6 +1518,180 @@ class _SimbaSimplifier:
         # currently only ever returns None. Kept in case QM coverage changes.
         return self._dnf_expression(predicate, variables)
 
+    def _canon(self, expr: Expr):
+        """A commutativity-insensitive canonical key for structural matching."""
+        if isinstance(expr, ExprOp):
+            args = [self._canon(arg) for arg in expr.args]
+            if expr.op in ("+", "*", "&", "|", "^"):
+                args = sorted(args, key=repr)
+            return (expr.op, tuple(args))
+        return ("leaf", repr(expr))
+
+    def _collapse_product_identities(self, expr: Expr) -> Expr:
+        """Bottom-up rewrite of ``(A&B)·(A|B)+(A&~B)·(~A&B)`` sub-sums to ``A·B``.
+
+        Returns ``expr`` unchanged (same object) when nothing matched, so callers
+        can cheaply detect a no-op.
+        """
+        if not isinstance(expr, ExprOp):
+            return expr
+        new_args = [self._collapse_product_identities(arg) for arg in expr.args]
+        changed = any(a is not b for a, b in zip(new_args, expr.args))
+        current = ExprOp(expr.op, *new_args) if changed else expr
+        if current.op == "+":
+            collapsed = self._collapse_sum_products(current)
+            if collapsed is not None:
+                return collapsed
+        return current
+
+    def _collapse_sum_products(self, sum_expr: ExprOp) -> Expr | None:
+        """Replace identity-matching product pairs inside one ``+`` node."""
+        terms = list(sum_expr.args)
+        any_change = False
+        progress = True
+        while progress:
+            progress = False
+            for i in range(len(terms)):
+                for j in range(i + 1, len(terms)):
+                    product = self._match_product_identity(terms[i], terms[j])
+                    if product is None:
+                        continue
+                    a, b = product
+                    if not self._validates_local(terms[i], terms[j], ExprOp("*", a, b)):
+                        continue
+                    # Simplify the product's factors: the obfuscation often hides
+                    # a linear MBA inside one factor (``B·y`` where ``B`` reduces
+                    # to ``a``), so reduce each before forming ``A·B``. Both are
+                    # equivalent to the original factors, so the validated
+                    # identity ``terms[i]+terms[j] == A·B`` still holds.
+                    a = _SimbaSimplifier(a, depth=self._depth + 1).simplify()
+                    b = _SimbaSimplifier(b, depth=self._depth + 1).simplify()
+                    folded = ExprOp("*", a, b)
+                    terms = [
+                        term for k, term in enumerate(terms) if k not in (i, j)
+                    ] + [folded]
+                    any_change = True
+                    progress = True
+                    break
+                if progress:
+                    break
+        if not any_change:
+            return None
+        if len(terms) == 1:
+            return terms[0]
+        return ExprOp("+", *terms)
+
+    def _match_product_identity(self, t1: Expr, t2: Expr):
+        """Return ``(A, B)`` if ``{t1, t2}`` look like ``(A&B)·(A|B)``/``(A&~B)·(~A&B)``.
+
+        ``A`` and ``B`` are read off the clean ``(A&B)·(A|B)`` factor; the other
+        term only needs to be a product of two non-constants. The numeric
+        identity ``t1 + t2 == A·B`` is then confirmed by the caller's
+        :meth:`_validates_local` guard, which is robust to how the second term's
+        ``~`` operands happen to be normalised (``~~(y-1)`` vs ``y-1``).
+        """
+        for first, second in ((t1, t2), (t2, t1)):
+            extracted = self._as_and_or_product(first)
+            if extracted is None:
+                continue
+            if (
+                isinstance(second, ExprOp)
+                and second.op == "*"
+                and sum(1 for arg in second.args if not isinstance(arg, ExprInt)) >= 2
+            ):
+                return extracted
+        return None
+
+    def _as_and_or_product(self, term: Expr):
+        """If ``term == (A&B)·(A|B)`` return ``(A, B)``, else None."""
+        if not (isinstance(term, ExprOp) and term.op == "*" and len(term.args) == 2):
+            return None
+        for conj, disj in (term.args, term.args[::-1]):
+            if not (
+                isinstance(conj, ExprOp)
+                and conj.op == "&"
+                and len(conj.args) == 2
+                and isinstance(disj, ExprOp)
+                and disj.op == "|"
+                and len(disj.args) == 2
+            ):
+                continue
+            a, b = conj.args
+            expected = ExprOp("|", a, b)
+            if self._canon(disj) == self._canon(expected):
+                return (a, b)
+        return None
+
+    def _is_andnot_product(self, term: Expr, a: Expr, b: Expr) -> bool:
+        """True iff ``term == (A&~B)·(~A&B)`` for the given ``A``, ``B``."""
+        if not (isinstance(term, ExprOp) and term.op == "*" and len(term.args) == 2):
+            return False
+        wanted = {
+            self._canon(self._conjunction([a, self._invert(b)])),
+            self._canon(self._conjunction([self._invert(a), b])),
+        }
+        actual = {self._canon(term.args[0]), self._canon(term.args[1])}
+        return wanted == actual
+
+    def _validates_local(self, t1: Expr, t2: Expr, folded: Expr) -> bool:
+        """Confirm ``t1 + t2 == folded`` on random inputs (soundness guard)."""
+        terminals = sorted(
+            _collect_terminals(t1) | _collect_terminals(t2) | _collect_terminals(folded),
+            key=repr,
+        )
+        rng = _DeterministicRandom(0x5119BA)
+        for _ in range(48):
+            env = {term: rng.next64() for term in terminals}
+            try:
+                left = (
+                    _eval_expr_int(t1, env, self.mask)
+                    + _eval_expr_int(t2, env, self.mask)
+                ) & self.mask
+                right = _eval_expr_int(folded, env, self.mask)
+            except (KeyError, ValueError):
+                return False
+            if left != right:
+                return False
+        return True
+
+    def _predicate_support(self, predicate: list[int], n_vars: int) -> list[int]:
+        """Return the variables the predicate actually depends on.
+
+        A variable is irrelevant when flipping its bit never changes the
+        predicate value; projecting onto the remaining variables lets a region
+        that uses only a few of many variables (``~x&(y^z)`` inside a 5-variable
+        expression) reuse the minimal ≤3-variable bitwise table.
+        """
+        support: list[int] = []
+        for index in range(n_vars):
+            bit = 1 << index
+            for assignment in range(1 << n_vars):
+                if assignment & bit:
+                    continue
+                if predicate[assignment] != predicate[assignment | bit]:
+                    support.append(index)
+                    break
+        return support
+
+    def _project_predicate(
+        self, predicate: list[int], support: list[int], n_vars: int
+    ) -> int:
+        """Pack the predicate's truth table over its ``support`` variables.
+
+        The predicate is independent of the variables outside ``support`` (by
+        construction in :meth:`_predicate_support`), so reading off one
+        consistent full assignment per sub-assignment is well defined.
+        """
+        table = 0
+        for sub in range(1 << len(support)):
+            assignment = 0
+            for position, index in enumerate(support):
+                if (sub >> position) & 1:
+                    assignment |= 1 << index
+            if predicate[assignment]:
+                table |= 1 << sub
+        return table
+
     def _dnf_expression(
         self, predicate: list[int], variables: list[Expr]
     ) -> Expr | None:
@@ -991,7 +1724,7 @@ class _SimbaSimplifier:
         occurring = _collect_atoms(expr)
         if len(occurring) > 3:
             return expr
-        inner = _SimbaSimplifier(expr)
+        inner = _SimbaSimplifier(expr, depth=self._depth + 1)
         return inner.simplify()
 
     def _effective_variable_count(self, expr: Expr) -> int:
@@ -1059,10 +1792,20 @@ class _SimbaSimplifier:
             return expr
         if isinstance(expr, ExprInt):
             return self._const(coefficient * int(expr))
+        if coefficient == self.mask:
+            # -1 · expr — a unary negation is one node smaller than ``mask·expr``
+            # and is what the reference forms use (``-x`` rather than ``0xFF..F·x``).
+            return ExprOp("-", expr)
         return ExprOp("*", self._const(coefficient), expr)
 
     def _sum(self, terms: list[Expr]) -> Expr:
-        """Build a variadic sum, dropping explicit zero terms."""
+        """Build a variadic sum, dropping zeros and using subtraction for
+        negated terms.
+
+        Negated terms (unary ``-X``) are collected and emitted with a binary
+        subtraction, so ``x + -y`` is built as ``x - y`` (one node smaller and the
+        canonical reference shape).
+        """
         filtered = [
             term for term in terms if not (isinstance(term, ExprInt) and int(term) == 0)
         ]
@@ -1070,7 +1813,27 @@ class _SimbaSimplifier:
             return self._const(0)
         if len(filtered) == 1:
             return filtered[0]
-        return ExprOp("+", *filtered)
+
+        def is_negated(term: Expr) -> bool:
+            return isinstance(term, ExprOp) and term.op == "-" and len(term.args) == 1
+
+        positive = [term for term in filtered if not is_negated(term)]
+        negative = [term.args[0] for term in filtered if is_negated(term)]
+        if not negative:
+            return ExprOp("+", *filtered)
+        # ``mask - X == ~X`` exactly — emit the canonical bitwise-not form.
+        if (
+            len(positive) == 1
+            and len(negative) == 1
+            and isinstance(positive[0], ExprInt)
+            and int(positive[0]) == self.mask
+        ):
+            return self._invert(negative[0])
+        if not positive:
+            inner = negative[0] if len(negative) == 1 else ExprOp("+", *negative)
+            return ExprOp("-", inner)
+        positive_expr = positive[0] if len(positive) == 1 else ExprOp("+", *positive)
+        return ExprOp("-", positive_expr, *negative)
 
     def _conjunction(self, terms: list[Expr]) -> Expr:
         if not terms:

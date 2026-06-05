@@ -141,8 +141,11 @@ def test_simplifier_pipeline_override_replaces_default() -> None:
 
     sim = Simplifier(pipeline=Pipeline([ConstantPass()]))
     assert [type(p).__name__ for p in sim.pipeline.passes] == ["ConstantPass"]
-    # End-to-end: ConstantPass alone produces 7 for any input.
-    assert sim.simplify(ExprId("x", 8)) == ExprInt(7, 8)
+    # End-to-end: ConstantPass alone produces 7 for any input. Feeding it an
+    # input that is itself equal to 7 (``3 + 4``) shows the override pipeline runs
+    # while keeping the result equivalent, so the simplifier's soundness gate
+    # accepts it. (On a non-equivalent input the gate would safely keep the input.)
+    assert sim.simplify(ExprOp("+", ExprInt(3, 8), ExprInt(4, 8))) == ExprInt(7, 8)
 
 
 def test_simplifier_pipeline_override_wins_over_mode() -> None:

@@ -17,8 +17,11 @@ from msynth.simplification.pipeline import (
     simba_pipeline,
 )
 from msynth.simplification.cegis import CegisSolver, TemplateOracle
+import random as _random
+
 from msynth.simplification.simba import SimbaPass
 from msynth.utils.expr_utils import (
+    compile_expr_to_python,
     get_subexpressions,
     get_unique_variables,
     is_strictly_smaller_tree,
@@ -29,8 +32,18 @@ from msynth.simplification.gamba import (
     gamba_substitution,
 )
 from msynth.simplification.rewrites import DEFAULT_REWRITER
-from msynth.utils.sampling import has_adversarial_counterexample
+from msynth.utils.sampling import (
+    _rename_variables_for_compilation,
+    gen_adversarial_inputs,
+    has_adversarial_counterexample,
+)
 from msynth.utils.unification import gen_unification_dict, reverse_unification
+
+# Number of random I/O probes used by the permissive equivalence check, in
+# addition to the deterministic edge-case inputs. Kept above the corpus runner's
+# probe count so a candidate that passes this gate also passes the runner's
+# independent equivalence check.
+_PERMISSIVE_RANDOM_PROBES = 128
 
 
 logger = logging.getLogger("msynth.simplifier")
@@ -575,21 +588,46 @@ class Simplifier:
         # be expensive or recursive on very large reverse-unified candidates.
         if not is_strictly_smaller_tree(simplified, expr):
             return False
-        equivalence_result = self.check_semantical_equivalence(expr, simplified)
-        # SMT solver proves non-equivalence or timeouts
-        if self.enforce_equivalence and equivalence_result != z3.unsat:
-            return False
-        # SMT solver finds a counter example
-        if equivalence_result == z3.sat:
-            return False
-        # In permissive mode, UNKNOWN is normally accepted to avoid slow SMT proofs.
-        # Before accepting it, run a tiny deterministic edge-value probe to catch
-        # sampled-oracle collisions such as variable-shift candidates that agree on
-        # random oracle inputs but fail around modular wraparound values.
-        if equivalence_result == z3.unknown and has_adversarial_counterexample(
-            expr, simplified
-        ):
-            return False
+        # Rigorous mode: require the SMT solver to prove equivalence.
+        if self.enforce_equivalence:
+            return self.check_semantical_equivalence(expr, simplified) == z3.unsat
+        # Permissive mode (default): verify equivalence by evaluating both
+        # expressions on deterministic edge-case inputs plus many random I/O
+        # pairs. This is the fast soundness gate — far cheaper than an SMT call
+        # per candidate (which dominates runtime on bitwise-heavy subtrees) while
+        # still catching non-equivalent rewrites with overwhelming probability.
+        return self._permissive_equivalent(expr, simplified)
+
+    def _permissive_equivalent(self, expr: Expr, simplified: Expr) -> bool:
+        """Fast random/edge-case equivalence check (no SMT).
+
+        Returns True when the two expressions agree on every probe. If the
+        expressions cannot be compiled to fast evaluators (an unusual IR shape),
+        falls back to the deterministic adversarial probe so behaviour degrades
+        gracefully rather than rejecting outright.
+        """
+        variables = sorted(
+            set(get_unique_variables(expr)) | set(get_unique_variables(simplified)),
+            key=lambda variable: str(variable),
+        )
+        try:
+            evaluate_expr = compile_expr_to_python(
+                _rename_variables_for_compilation(expr, variables)
+            )
+            evaluate_simplified = compile_expr_to_python(
+                _rename_variables_for_compilation(simplified, variables)
+            )
+        except Exception:
+            return not has_adversarial_counterexample(expr, simplified)
+        for inputs in gen_adversarial_inputs(variables):
+            if evaluate_expr(inputs) != evaluate_simplified(inputs):
+                return False
+        rng = _random.Random(0x5117BA)
+        width = len(variables)
+        for _ in range(_PERMISSIVE_RANDOM_PROBES):
+            inputs = [rng.getrandbits(64) for _ in range(width)]
+            if evaluate_expr(inputs) != evaluate_simplified(inputs):
+                return False
         return True
 
     def _find_suitable_simplification(
@@ -709,6 +747,12 @@ class Simplifier:
         # every pipeline ends with AstNormalizationPass) plus any
         # pipeline-mode-specific simplification (SimBA, GAMBA pre/post).
         ast = self.pipeline.run(expr)
+        # The pipeline output is already a sound, often-minimal reconstruction.
+        # Keep it as a floor: the later BFS loop / reverse-substitution / closing
+        # rewriter are all equivalence-preserving but can occasionally rebuild a
+        # compact SimBA form into a larger one (e.g. expr_simp expanding
+        # ``-(((y^z)&x)^(y^z))``), so the final result never exceeds this size.
+        pipeline_output = ast
         # global_reg{N} -> simplified body. Reverse-substituted in
         # phase 4 after the fixpoint loop terminates.
         global_unification_dict: Dict[Expr, Expr] = {}
@@ -819,4 +863,28 @@ class Simplifier:
         # factor rules). Catches shapes that only became simplifiable
         # after reverse-substitution exposed common structure across
         # previously-separate subtrees.
-        return DEFAULT_REWRITER.normalize(ast)
+        rewritten = DEFAULT_REWRITER.normalize(ast)
+
+        # Return the smallest form across the pipeline output, the post-
+        # substitution AST, and the closing-rewriter output that is verified
+        # equivalent to the original input. The stages are individually
+        # equivalence-preserving by construction, but a faulty algebraic rule
+        # anywhere in the pipeline (GAMBA pre/post rewriters, the closing
+        # rewriter, …) could in principle emit a non-equivalent form; gating the
+        # whole pipeline's output on a fast random/edge-case equivalence check
+        # guarantees the simplifier only ever returns a correct expression, and
+        # the original ``expr`` is always a sound fallback.
+        def _node_count(candidate: Expr) -> int:
+            try:
+                return len(candidate.graph().nodes())
+            except Exception:
+                return len(get_subexpressions(candidate))
+
+        equivalent = [
+            candidate
+            for candidate in (pipeline_output, ast, rewritten)
+            if self._permissive_equivalent(expr, candidate)
+        ]
+        if equivalent:
+            return min(equivalent, key=_node_count)
+        return expr

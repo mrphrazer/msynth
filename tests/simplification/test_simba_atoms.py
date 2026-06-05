@@ -1141,11 +1141,18 @@ def test_simba_operand_kind_rejection_or_bitwise_arithmetic_no_op() -> None:
     assert SimbaPass().run(expr) is expr
 
 
-def test_simba_operand_kind_rejection_xor_mixed_mixed_no_op() -> None:
+def test_simba_operand_kind_rejection_xor_mixed_mixed_simplifies_operands() -> None:
+    # The top ``^`` is MIXED ^ MIXED — outside the linear-MBA fragment, so SimBA
+    # cannot reconstruct the whole node. Its operands are nonetheless linear MBAs,
+    # and the bottom-up pass simplifies them in place (here ``y + x + -x`` collapses
+    # to ``y``), yielding a smaller equivalent expression. The rewrite stays sound
+    # and never grows the node count.
     a = _X32 & _Y32
     b = _Y32 + _X32
     expr = (a + ExprOp("-", _Y32)) ^ (b + ExprOp("-", _X32))
-    assert SimbaPass().run(expr) is expr
+    out = SimbaPass().run(expr)
+    assert _z3_equivalent(expr, out)
+    assert len(out.graph().nodes()) <= len(expr.graph().nodes())
 
 
 def test_simba_operand_kind_rejection_propagates_through_outer_sum() -> None:

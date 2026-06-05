@@ -351,11 +351,10 @@ def test_gamba_pipeline_is_sound_on_zoo(expr: Expr) -> None:
 
 
 def test_gamba_substitution_escalation_end_to_end_unlocks_nonlinear_atom() -> None:
-    # ((x*y) ^ z) + 2*((x*y) & z) is the MBA identity for (x*y) + z. SimBA
-    # REJECTS the product-of-two-variables x*y (not a linear-MBA shape), so at
-    # max_k=0 the whole expression is a no-op and stays obfuscated. At max_k>=1
-    # the §5.1 loop abstracts x*y to a fresh atom, SimBA reduces the linearised
-    # form to g0 + z, and reverse-substitution restores (x*y) + z.
+    # ((x*y) ^ z) + 2*((x*y) & z) is the MBA identity for (x*y) + z. SimBA now
+    # ATOMISES the product-of-two-variables x*y (GAMBA Section 5.5), so the
+    # linearised identity a^z + 2*(a&z) == a+z reduces directly to (x*y)+z even
+    # at max_k=0; the §5.1 substitution escalation (max_k>=1) does not regress it.
     from test_rewrites import _z3_equivalent
 
     x = ExprId("x", 8)
@@ -371,14 +370,14 @@ def test_gamba_substitution_escalation_end_to_end_unlocks_nonlinear_atom() -> No
         pipeline_mode=PipelineMode.GAMBA, gamba_substitution_max_k=2
     ).simplify(expr)
 
-    # Both must stay sound.
+    # Both must stay sound and both recover the de-obfuscated (x*y) + z.
     assert _z3_equivalent(expr, out0)
     assert _z3_equivalent(expr, out2)
-    # Escalation strictly helps: max_k=0 cannot reduce, max_k>=1 does.
-    assert out2 != out0
-    assert _nodes(out2) < _nodes(out0)
-    # The recovered form is the de-obfuscated (x*y) + z.
+    assert _z3_equivalent(out0, ExprOp("+", p, z))
     assert _z3_equivalent(out2, ExprOp("+", p, z))
+    # Both strictly simplify the obfuscated input.
+    assert _nodes(out0) < _nodes(expr)
+    assert _nodes(out2) < _nodes(expr)
 
 
 def test_gamba_substitution_escalation_end_to_end_is_sound_when_no_reduction() -> None:

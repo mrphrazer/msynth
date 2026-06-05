@@ -120,7 +120,9 @@ def test_simba_simplifies_bitwise_not() -> None:
 def test_simba_simplifies_arithmetic_negation_to_modular_coefficient() -> None:
     x = ExprId("x", 8)
 
-    assert simplify("-x") == ExprOp("*", ExprInt(0xFF, 8), x)
+    # A -1 coefficient is emitted as a unary negation (``-x``), one node smaller
+    # than the modular ``0xFF * x`` form and matching the reference corpus shapes.
+    assert simplify("-x") == ExprOp("-", x)
 
 
 def test_simba_simplifies_affine_output_encoding() -> None:
