@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Schema, soundness, and CEGIS-coverage checks for the dedicated CEGIS corpus.
 
 ``datasets/corpora/cegis.jsonl.gz`` is evaluated by
@@ -8,6 +6,8 @@ the runner's IR schema, that every row's ground truth is a true equivalent of th
 (larger) obfuscated input, and that the set genuinely exercises the CEGIS constant
 solver (some rows are uncovered without it, all covered with it).
 """
+
+from __future__ import annotations
 
 import gzip
 import json

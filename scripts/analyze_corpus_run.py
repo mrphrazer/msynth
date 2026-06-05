@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Bucket the *uncovered* rows of a corpus run to drive the optimization loop.
 
 Reads the per-row JSON emitted by ``run_simplification_corpus.py --json-output``,
@@ -15,6 +13,8 @@ With ``--examples N`` it re-simplifies a few uncovered rows per source (with the
 given pipeline mode, empty oracle, no CEGIS) and prints input / expected / our
 output with node counts so the responsible code path is obvious.
 """
+
+from __future__ import annotations
 
 import argparse
 import collections
@@ -105,7 +105,7 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    results = [json.loads(l) for l in args.json.open() if l.strip()]
+    results = [json.loads(line) for line in args.json.open() if line.strip()]
     corpus = load_corpus_index(args.corpus, args.suite)
 
     per_source = collections.defaultdict(lambda: collections.Counter())
