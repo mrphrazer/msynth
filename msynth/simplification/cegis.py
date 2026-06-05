@@ -588,8 +588,16 @@ class CegisSolver:
         self._io_k = 4
         self._io_kmask = (1 << self._io_k) - 1
         self._io_filter_inputs = [
-            (1, 2, 3), (3, 5, 7), (7, 1, 4), (5, 6, 2), (2, 7, 5),
-            (4, 3, 6), (6, 4, 1), (0, 1, 2), (15, 8, 11), (9, 14, 5),
+            (1, 2, 3),
+            (3, 5, 7),
+            (7, 1, 4),
+            (5, 6, 2),
+            (2, 7, 5),
+            (4, 3, 6),
+            (6, 4, 1),
+            (0, 1, 2),
+            (15, 8, 11),
+            (9, 14, 5),
         ]
         self._walk_cache: Dict[int, tuple] = {}
         # Max placeholder constants the synthesis tier will abstract from a
@@ -885,9 +893,7 @@ class CegisSolver:
             counterexample = []
             for i in range(num_vars):
                 bv = z3.BitVec(f"p{i}", size)
-                counterexample.append(
-                    model.eval(bv, model_completion=True).as_long()
-                )
+                counterexample.append(model.eval(bv, model_completion=True).as_long())
             return counterexample
         except Exception:
             # Any translation/solver failure: defer to sampling (already passed).
@@ -980,9 +986,7 @@ class CegisSolver:
         return out
 
     @staticmethod
-    def _solve_linear_mod(
-        rows: List[List[int]], rhs: List[int], ncols: int, size: int
-    ):
+    def _solve_linear_mod(rows: List[List[int]], rhs: List[int], ncols: int, size: int):
         """Solve ``rows · x == rhs`` over Z/2^size by odd-pivot elimination.
 
         Returns ``("solved", x)`` with a consistent solution; ``("unsat", None)``
@@ -1044,9 +1048,7 @@ class CegisSolver:
         resized = self._resize_expr(template, size)
         placeholders = self._placeholder_vars(resized, "c")
         base = self.template_oracle.num_variables
-        rename = {
-            c: ExprId(f"p{base + j}", size) for j, c in enumerate(placeholders)
-        }
+        rename = {c: ExprId(f"p{base + j}", size) for j, c in enumerate(placeholders)}
         evaluator = _make_evaluator(resized.replace_expr(rename))
         result = (evaluator, placeholders, base, resized)
         self._template_cache[key] = result
@@ -1125,7 +1127,9 @@ class CegisSolver:
             evaluated = eval_all(unit)
             if evaluated is None:
                 return "not_affine"
-            columns.append([(evaluated[i] - offset[i]) & mask for i in range(len(inputs))])
+            columns.append(
+                [(evaluated[i] - offset[i]) & mask for i in range(len(inputs))]
+            )
         # Verify affinity on random constant vectors. A failure means the
         # template is not affine in its constants (xor/mask/shift positions);
         # signal that with the ``"not_affine"`` sentinel so the caller tries Z3.
@@ -1236,7 +1240,9 @@ class CegisSolver:
             n_consistent = 0
             for pattern in range(patterns):
                 column = table[pattern]
-                if all(((column[i] >> bit) & 1) == target[i] for i in range(len(inputs))):
+                if all(
+                    ((column[i] >> bit) & 1) == target[i] for i in range(len(inputs))
+                ):
                     n_consistent += 1
                     if matched == -1:
                         matched = pattern
@@ -1594,9 +1600,7 @@ class CegisSolver:
             if not self._is_uniform_width(unified_subtree, subtree.size):
                 return None
         try:
-            return self._try_synthesize_impl(
-                subtree, unified_subtree, unification_dict
-            )
+            return self._try_synthesize_impl(subtree, unified_subtree, unification_dict)
         except Exception:
             return None
 
@@ -1709,9 +1713,7 @@ class CegisSolver:
                 # wrappers; only the verbatim skeleton copies keep the target's
                 # shape, so re-derive the synthesis set by structural identity.
                 synthesis_ids = set(
-                    id(t)
-                    for t in templates
-                    if any(t == s for s in skeleton_templates)
+                    id(t) for t in templates if any(t == s for s in skeleton_templates)
                 )
         else:
             templates = self._filtered_walk_templates(
@@ -1728,8 +1730,8 @@ class CegisSolver:
         for template in templates[: self.max_templates]:
             if time.time() > solve_deadline:
                 break
-            _evaluator, tpl_placeholders, _base, resized_template = self._cached_template(
-                template, subtree.size
+            _evaluator, tpl_placeholders, _base, resized_template = (
+                self._cached_template(template, subtree.size)
             )
             p_vars = self._placeholder_vars(resized_template, "p")
             if p_vars and int(p_vars[-1].name[1:]) >= num_vars:
@@ -1924,9 +1926,7 @@ class CegisSolver:
         """
         k = self._io_k
         kmask = self._io_kmask
-        rows = [
-            (list(pv) + [0] * base)[:base] for pv in self._io_filter_inputs
-        ]
+        rows = [(list(pv) + [0] * base)[:base] for pv in self._io_filter_inputs]
         sigset = set()
         for combo in range(1 << (k * ncols)):
             cvals = [(combo >> (k * j)) & kmask for j in range(ncols)]
