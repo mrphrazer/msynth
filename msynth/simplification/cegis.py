@@ -551,13 +551,16 @@ class CegisSolver:
         # only a fallback for mixed arith+bitwise constant positions, where a
         # matching template (tried first via the skeleton index) solves within
         # the per-call cap, while a miss is bounded by the cumulative budget.
-        self._z3_timeout_ms = 150
-        self._z3_target_budget_ms = 300
-        # Budget for the exact exists-forall constant-synthesis escalation. It
-        # only fires after a Z3 disproof flags a masked/underdetermined constant
-        # (a handful of times over a whole corpus), so a generous budget here
-        # buys reliable hard-tail coverage without touching the common-case path.
-        self._z3_forall_timeout_ms = 250
+        # Per-subtree Z3 caps. Successful affine/bitwise/bit-serial solves finish
+        # in well under these; the budgets only bound *failing* subtrees, which
+        # on a real-world corpus (where CEGIS is tried on every subtree) dominate
+        # wall-time. Kept tight: the common-case coverage is insensitive to them,
+        # only the rare adversarial masked-constant tail needs more.
+        self._z3_timeout_ms = 80
+        self._z3_target_budget_ms = 80
+        # Budget for the exact exists-forall constant-synthesis escalation (fires
+        # only after a Z3 disproof flags a masked/underdetermined constant).
+        self._z3_forall_timeout_ms = 80
         # Side-channel: which solver produced the most recent _solve_template
         # result ('affine'/'bitwise'/'bit_serial'/'z3'/None). Lets _solve_validated
         # skip the Z3 equivalence gate for exact (affine) solves.

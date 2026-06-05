@@ -46,6 +46,26 @@ from msynth.utils.unification import gen_unification_dict, reverse_unification
 _PERMISSIVE_RANDOM_PROBES = 128
 
 
+def binarized_node_count(expr: Expr) -> int:
+    """Graph-node count of ``expr`` after canonicalizing to a strict binary tree.
+
+    Representation-independent size: miasm's ``expr_simp`` emits variadic
+    ``ExprOp`` nodes (``a+b+c`` is one graph node over three leaves) while a
+    binarised form has the extra inner nodes. A raw ``len(expr.graph().nodes())``
+    would therefore rank a variadic-but-not-actually-smaller stage above a
+    genuinely smaller binary one. Used to select the smallest among the
+    pipeline / AST / closing-rewriter stages, matching the corpus ``node_count``.
+    """
+    try:
+        binary = AbstractSyntaxTreeTranslator().from_expr(expr)
+    except Exception:
+        binary = expr
+    try:
+        return len(binary.graph().nodes())
+    except Exception:
+        return len(get_subexpressions(binary))
+
+
 logger = logging.getLogger("msynth.simplifier")
 
 
@@ -171,6 +191,7 @@ class Simplifier:
         cegis_validation_samples: int = 16,
         cegis_expand_templates: bool = True,
         cegis_expansion_budget: int = 40,
+        cegis_min_nodes: int = 5,
     ):
         """
         Initializes an instance of Simplifier.
@@ -268,6 +289,7 @@ class Simplifier:
         self._subtree_simba_max_vars = subtree_simba_max_vars
         self._subtree_simba_max_nodes = subtree_simba_max_nodes
         self._gamba_substitution_max_k = gamba_substitution_max_k
+        self._cegis_min_nodes = cegis_min_nodes
         # CEGIS solver — built lazily, only when enable_cegis=True, so the
         # off-path costs nothing besides one None check per fallback hop.
         self._cegis_solver: Optional[CegisSolver] = None
@@ -761,8 +783,17 @@ class Simplifier:
         # Phase 2 + 3: oracle/SimBA/CEGIS fixpoint loop.
         while True:
             before = ast
+            # Subtrees made stale by an in-pass replacement (the replaced subtree
+            # and its descendants). Tracking them lets the pass *continue*
+            # instead of restarting the whole walk after every hit: the old code
+            # was O(simplifications x subtrees); this is O(passes x subtrees).
+            # The outer fixpoint loop still reprocesses ancestors that gained a
+            # placeholder child, so the result is unchanged.
+            removed: set = set()
 
             for subtree in get_subexpressions(ast):
+                if subtree in removed:
+                    continue
                 # Terminals (ExprId / ExprInt / ExprLoc) have no
                 # substructure to fold; skip the round-trip.
                 if self._skip_subtree(subtree):
@@ -813,7 +844,15 @@ class Simplifier:
                 # expressions whose shape matches a template but whose
                 # constants are arbitrary and therefore absent from the
                 # precomputed oracle.
-                if simplified is None and self._cegis_solver is not None:
+                if (
+                    simplified is None
+                    and self._cegis_solver is not None
+                    # CEGIS's smallest reducible shape is the 7-node
+                    # ``(x|k)+(x&k)``; a subtree below that bound has no smaller
+                    # constant-bearing equivalent to recover, so skip the
+                    # (per-subtree, on every real-world subtree) template walk.
+                    and len(subtree.graph().nodes()) >= self._cegis_min_nodes
+                ):
                     unified_subtree = subtree.replace_expr(unification_dict)
                     candidate = self._cegis_solver.try_synthesize(
                         subtree, unified_subtree, unification_dict
@@ -845,13 +884,18 @@ class Simplifier:
                 global_variable = self._gen_global_variable_replacement(
                     global_ctr, subtree.size
                 )
+                new_ast = ast.replace_expr({subtree: global_variable})
+                if new_ast == ast:
+                    # Subtree no longer present in the (incrementally rewritten)
+                    # AST -- it was folded into an earlier in-pass replacement.
+                    # Skip without consuming a placeholder index.
+                    continue
+                ast = new_ast
                 global_ctr += 1
                 global_unification_dict[global_variable] = simplified
-                ast = ast.replace_expr({subtree: global_variable})
-                # Restart the BFS from the top of the (now shrunk)
-                # AST — later subtrees in the current walk may have
-                # disappeared.
-                break
+                # Mark this subtree and its descendants stale for the remainder
+                # of the pass; do NOT restart the walk.
+                removed.update(get_subexpressions(subtree))
 
             if before == ast:
                 break
@@ -874,17 +918,11 @@ class Simplifier:
         # whole pipeline's output on a fast random/edge-case equivalence check
         # guarantees the simplifier only ever returns a correct expression, and
         # the original ``expr`` is always a sound fallback.
-        def _node_count(candidate: Expr) -> int:
-            try:
-                return len(candidate.graph().nodes())
-            except Exception:
-                return len(get_subexpressions(candidate))
-
         equivalent = [
             candidate
             for candidate in (pipeline_output, ast, rewritten)
             if self._permissive_equivalent(expr, candidate)
         ]
         if equivalent:
-            return min(equivalent, key=_node_count)
+            return min(equivalent, key=binarized_node_count)
         return expr
