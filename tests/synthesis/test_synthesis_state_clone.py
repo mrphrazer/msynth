@@ -8,18 +8,25 @@ These tests pin that contract across many state shapes, and additionally guard t
 clone() does not rebuild expr_ast via .copy() (a no-op for immutable interned Exprs,
 since copy() just returns the same object).
 """
+
 from __future__ import annotations
 
 import pytest
 
 from miasm.expression.expression import (
-    ExprId, ExprInt, ExprOp, ExprSlice, ExprCond, ExprCompose, ExprMem,
+    ExprId,
+    ExprInt,
+    ExprOp,
+    ExprSlice,
+    ExprCond,
+    ExprCompose,
+    ExprMem,
 )
 
 from msynth.synthesis.state import SynthesisState
 from msynth.utils.expr_utils import get_unique_variables
 
-O = ExprOp
+OP = ExprOp
 
 
 def _state_cases():
@@ -30,23 +37,50 @@ def _state_cases():
         t = [ExprId(f"t{i}_{sz}", sz) for i in range(6)]
         x, y, z = (ExprId(n, sz) for n in ("x", "y", "z"))
         cases += [
-            (f"binary_add_{sz}", O("+", t[0], t[1]), {t[0]: x, t[1]: y}),
-            (f"repeated_leaf_{sz}", O("*", O("+", t[0], t[1]), t[2]), {t[0]: x, t[1]: y, t[2]: x}),
+            (f"binary_add_{sz}", OP("+", t[0], t[1]), {t[0]: x, t[1]: y}),
+            (
+                f"repeated_leaf_{sz}",
+                OP("*", OP("+", t[0], t[1]), t[2]),
+                {t[0]: x, t[1]: y, t[2]: x},
+            ),
             (f"single_leaf_{sz}", t[0], {t[0]: x}),
-            (f"const_replacement_{sz}", O("^", t[0], t[1]), {t[0]: x, t[1]: ExprInt(5, sz)}),
-            (f"deep_tree_{sz}", O("+", O("*", t[0], t[1]), O("^", t[2], t[3])),
-             {t[0]: x, t[1]: y, t[2]: z, t[3]: x}),
-            (f"nary_{sz}", O("&", t[0], t[1], t[2], t[3]), {t[0]: x, t[1]: y, t[2]: z, t[3]: y}),
-            (f"slice_{sz}", ExprSlice(O("+", t[0], t[1]), 0, sz // 2), {t[0]: x, t[1]: y}),
-            (f"cond_{sz}", ExprCond(ExprSlice(t[0], 0, 1), t[1], t[2]), {t[0]: x, t[1]: y, t[2]: z}),
+            (
+                f"const_replacement_{sz}",
+                OP("^", t[0], t[1]),
+                {t[0]: x, t[1]: ExprInt(5, sz)},
+            ),
+            (
+                f"deep_tree_{sz}",
+                OP("+", OP("*", t[0], t[1]), OP("^", t[2], t[3])),
+                {t[0]: x, t[1]: y, t[2]: z, t[3]: x},
+            ),
+            (
+                f"nary_{sz}",
+                OP("&", t[0], t[1], t[2], t[3]),
+                {t[0]: x, t[1]: y, t[2]: z, t[3]: y},
+            ),
+            (
+                f"slice_{sz}",
+                ExprSlice(OP("+", t[0], t[1]), 0, sz // 2),
+                {t[0]: x, t[1]: y},
+            ),
+            (
+                f"cond_{sz}",
+                ExprCond(ExprSlice(t[0], 0, 1), t[1], t[2]),
+                {t[0]: x, t[1]: y, t[2]: z},
+            ),
         ]
     # 32-bit-only structural shapes
     t = [ExprId(f"u{i}", 32) for i in range(4)]
     x, y = ExprId("x", 32), ExprId("y", 32)
     cases += [
-        ("compose", ExprCompose(ExprSlice(t[0], 0, 16), ExprSlice(t[1], 0, 16)), {t[0]: x, t[1]: y}),
-        ("mem_ptr", ExprMem(O("+", t[0], t[1]), 32), {t[0]: x, t[1]: y}),
-        ("empty_replacements", O("+", ExprId("a", 32), ExprId("b", 32)), {}),
+        (
+            "compose",
+            ExprCompose(ExprSlice(t[0], 0, 16), ExprSlice(t[1], 0, 16)),
+            {t[0]: x, t[1]: y},
+        ),
+        ("mem_ptr", ExprMem(OP("+", t[0], t[1]), 32), {t[0]: x, t[1]: y}),
+        ("empty_replacements", OP("+", ExprId("a", 32), ExprId("b", 32)), {}),
     ]
     return cases
 
@@ -121,7 +155,7 @@ def test_clone_does_not_rebuild_expr_ast(monkeypatch):
     for immutable interned Exprs). Spies on the op's copy() and asserts 0 calls."""
     t0, t1 = ExprId("t0", 32), ExprId("t1", 32)
     x, y = ExprId("x", 32), ExprId("y", 32)
-    state = SynthesisState(O("+", t0, t1), {t0: x, t1: y})
+    state = SynthesisState(OP("+", t0, t1), {t0: x, t1: y})
 
     calls = {"n": 0}
     op_type = type(state.expr_ast)
