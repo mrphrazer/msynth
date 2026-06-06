@@ -60,7 +60,7 @@ class SynthesisState:
         Returns:
             SynthesisState: Cloned state.
         """
-        return SynthesisState(self.expr_ast.copy(), self.replacements.copy())
+        return SynthesisState(self.expr_ast, self.replacements.copy())
 
     def get_expr(self) -> Expr:
         """

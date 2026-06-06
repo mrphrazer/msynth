@@ -103,7 +103,7 @@ class AbstractSyntaxTreeTranslator(Translator):  # type: ignore
 
         if len(args) > 1:
             for arg in args[1:]:
-                res = ExprOp(expr.op, res, self.from_expr(arg))
+                res = ExprOp(expr.op, res, arg)
         else:
             res = ExprOp(expr.op, res)
         return res
