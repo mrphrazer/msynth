@@ -1,5 +1,6 @@
 import logging
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -17,6 +18,10 @@ from msynth.simplification.pipeline import (
     simba_pipeline,
 )
 from msynth.simplification.cegis import CegisSolver, TemplateOracle
+from msynth.simplification.dead_variable_elimination import (
+    DeadVariableEliminationConfig,
+    DeadVariableEliminationPass,
+)
 import random as _random
 
 from msynth.simplification.simba import SimbaPass
@@ -80,7 +85,10 @@ class Simplifier:
     1. **Pipeline** (top-level, runs once at the start of
        :meth:`simplify`). Selected via :class:`PipelineMode`; see
        :mod:`msynth.simplification.pipeline` for the three presets
-       (``AST`` / ``SIMBA`` / ``GAMBA``).
+       (``AST`` / ``SIMBA`` / ``GAMBA``). Optionally prefixed by a
+       :class:`~msynth.simplification.dead_variable_elimination.DeadVariableEliminationPass`
+       (``enable_dead_variable_elimination=True``, off by default) that prunes
+       semantically dead/opaque variables before SimBA/GAMBA.
     2. **Oracle lookup** (per subtree). Looks the subtree up in
        :class:`SimplificationOracle` by its I/O equivalence class.
     3. **Subtree-SimBA** (per subtree, on oracle miss). Re-runs SimBA
@@ -191,6 +199,8 @@ class Simplifier:
         cegis_expand_templates: bool = True,
         cegis_expansion_budget: int = 40,
         cegis_min_nodes: int = 5,
+        enable_dead_variable_elimination: bool = False,
+        dead_variable_elimination_config: DeadVariableEliminationConfig | None = None,
     ):
         """
         Initializes an instance of Simplifier.
@@ -252,6 +262,19 @@ class Simplifier:
                 light constant decorations (``+c``, ``^c``, ``(&c)|c'``)
                 to broaden coverage without manual enumeration.
             cegis_expansion_budget: Cap on total expanded templates.
+            enable_dead_variable_elimination: Prepend a
+                :class:`~msynth.simplification.dead_variable_elimination.DeadVariableEliminationPass`
+                to the pipeline so it runs **before** SimBA/GAMBA. **Off by
+                default.** It detects semantically dead/opaque variables by
+                sampling and replaces them with ``0`` (validated by a sampling
+                gate plus a short-timeout Z3 check), shrinking the variable
+                count so the heavier simplifiers can fire. Sound by
+                construction: it returns the original on any validation failure,
+                and the final equivalence gate re-checks against the input.
+            dead_variable_elimination_config: Optional
+                :class:`DeadVariableEliminationConfig` overriding the pass's
+                tunables. Ignored unless ``enable_dead_variable_elimination`` is
+                set (which forces ``enabled=True``).
         """
         # public attributes
         self.oracle = (
@@ -271,6 +294,23 @@ class Simplifier:
                 PipelineMode.SIMBA: simba_pipeline,
                 PipelineMode.GAMBA: gamba_pipeline,
             }[pipeline_mode]()
+
+        # Optional dead/opaque-variable elimination, prepended so it runs BEFORE
+        # SimBA/GAMBA: pruning fake variables shrinks the variable count, which
+        # is what gates the heavier simplifiers. The pass self-validates and
+        # returns the original on any failure; the final equivalence gate in
+        # ``simplify`` (against the original input) is an additional backstop.
+        self._dead_var_pass: Optional[DeadVariableEliminationPass] = None
+        if enable_dead_variable_elimination:
+            config = dead_variable_elimination_config or DeadVariableEliminationConfig(
+                enabled=True
+            )
+            # The Simplifier flag is the enablement switch; honour it regardless
+            # of the config object's own ``enabled`` default.
+            if not config.enabled:
+                config = replace(config, enabled=True)
+            self._dead_var_pass = DeadVariableEliminationPass(config)
+            self.pipeline = Pipeline([self._dead_var_pass, *self.pipeline.passes])
 
         # internal attributes
         self._translator_z3 = TranslatorZ3()

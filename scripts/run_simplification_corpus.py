@@ -253,6 +253,7 @@ def init_worker(
     enforce_equivalence: bool,
     pipeline_mode_name: str,
     enable_cegis: bool = False,
+    enable_dead_variable_elimination: bool = False,
 ) -> None:
     global _SIMPLIFIER
     # ``oracle_path=None`` (passed when ``--empty-oracle`` is set) constructs
@@ -266,6 +267,7 @@ def init_worker(
         solver_timeout=solver_timeout,
         enforce_equivalence=enforce_equivalence,
         enable_cegis=enable_cegis,
+        enable_dead_variable_elimination=enable_dead_variable_elimination,
     )
 
 
@@ -364,6 +366,7 @@ def run_checks(
     pipeline_mode_name: str,
     success_metric: str = "passed",
     enable_cegis: bool = False,
+    enable_dead_variable_elimination: bool = False,
 ) -> list[CheckResult]:
     oracle_arg: str | None = str(oracle_path) if oracle_path is not None else None
 
@@ -374,6 +377,7 @@ def run_checks(
             enforce_equivalence,
             pipeline_mode_name,
             enable_cegis,
+            enable_dead_variable_elimination,
         )
         results = []
         for record in records:
@@ -393,6 +397,7 @@ def run_checks(
             enforce_equivalence,
             pipeline_mode_name,
             enable_cegis,
+            enable_dead_variable_elimination,
         ),
     ) as executor:
         for result in executor.map(check_record, records):
@@ -557,6 +562,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--dead-vars",
+        action="store_true",
+        help=(
+            "Enable the dead/opaque-variable elimination pass (off by default). "
+            "Prepended before SimBA/GAMBA: prunes variables that never affect the "
+            "output (validated by sampling + a short-timeout Z3 check), shrinking "
+            "the variable count so the heavier tiers can fire."
+        ),
+    )
+    parser.add_argument(
         "--success-metric",
         choices=SUCCESS_METRICS,
         default="passed",
@@ -635,6 +650,7 @@ def main() -> int:
         pipeline_mode_name=args.mode,
         success_metric=args.success_metric,
         enable_cegis=args.cegis,
+        enable_dead_variable_elimination=args.dead_vars,
     )
     elapsed = time.time() - start
 
