@@ -1,7 +1,7 @@
 # msynth
 Author: **Tim Blazytko** and **Moritz Schloegel**
 
-msynth is a code deobfuscation framework to simplify Mixed Boolean-Arithmetic (MBA) expressions. Given a pre-computed simplification oracle, it walks over a complex expression represented as an abstract syntax tree (AST) and tries to simplify subtrees based on oracle lookups. Alternatively, it tries to simplify expressions via stochastic program synthesis.  
+msynth is a code deobfuscation framework to simplify Mixed Boolean-Arithmetic (MBA) expressions. Given a pre-computed simplification oracle, it walks over a complex expression represented as an abstract syntax tree (AST) and tries to simplify subtrees using various algebraic & semantic simplification techniques. Alternatively, it tries to simplify expressions via stochastic program synthesis.  
 
 msynth is built on top of [Miasm](https://github.com/cea-sec/miasm) and inspired by the papers 
 
