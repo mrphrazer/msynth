@@ -172,6 +172,10 @@ class Synthesizer:
         the task group succeeds, other instances will be terminated. In case no worker succeeds,
         the initial provided expression will be returned.
 
+        Parallel execution requires POSIX fork. It uses a local multiprocessing
+        context, so calls at module level work without changing the application's
+        global start method.
+
         Args:
             expr (Expr): Expression representing a function f(x0, ..., xi) in Miasm IR.
             num_samples (int): Number of I/O samples for the synthesis oracle.

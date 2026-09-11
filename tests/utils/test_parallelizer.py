@@ -34,6 +34,10 @@ class _FakeMultiprocessing:
     def Manager(self):
         return _FakeManager()
 
+    def get_context(self, method):
+        assert method == "fork"
+        return self
+
     def cpu_count(self):
         return 1
 

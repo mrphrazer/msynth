@@ -13,6 +13,9 @@ class Parallelizer(object):
     If any worker finds a solution, all other workers of the same
     task group will be killed/not started.
 
+    Workers may be local functions, so this class requires the POSIX fork
+    start method. A local context leaves the application's default unchanged.
+
     Attributes:
         tasks (List[Tuple[Any, str]]): List of functions to execute
         task_groups (List[str]): List of task groups.
@@ -52,7 +55,8 @@ class Parallelizer(object):
             List[Any]: List of results filled by workers.
         """
         # initialise parallel data structures
-        manager = multiprocessing.Manager()
+        context = multiprocessing.get_context("fork")
+        manager = context.Manager()
         results: List[Any] = manager.list()
         processes: List[Process] = [None] * len(self.functions)  # type: ignore
 
@@ -71,9 +75,7 @@ class Parallelizer(object):
             results.append(None)
 
             # create process
-            processes[i] = multiprocessing.Process(
-                target=self.functions[i], args=(results, i)
-            )
+            processes[i] = context.Process(target=self.functions[i], args=(results, i))
 
             # map process to process index
             process_to_index[processes[i]] = i
