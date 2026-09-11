@@ -1,3 +1,3 @@
 wheel
 z3-solver
-miasm @ git+https://github.com/cea-sec/miasm@24a64bb30a181d60fe9572293c1b2fa597b2d0c9
+miasm @ git+https://github.com/cea-sec/miasm@1dc5fa90311992c92b7cff08f3c5354ece67a995

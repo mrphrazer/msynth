@@ -58,6 +58,14 @@ pip install .
 unzip -d database -q database/3_variables_constants_7_nodes.txt.zip
 ```
 
+When updating an existing environment, reinstall the dependencies to pick up the
+pinned Miasm commit. Different Miasm commits can report the same package version,
+so a regular install can leave the older commit installed:
+
+```bash
+python -m pip install --force-reinstall -r requirements.txt
+```
+
 
 ## Pre-computed Simplification Lookup Tables
 

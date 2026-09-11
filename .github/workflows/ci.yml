@@ -7,6 +7,10 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -14,7 +18,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install tooling and dependencies
         run: |
@@ -22,11 +26,11 @@ jobs:
           pip install pytest ruff
           pip install -r requirements.txt
 
+      - name: Pytest
+        run: pytest
+
       - name: Ruff format check
         run: ruff format --check .
 
       - name: Ruff lint
         run: ruff check .
-
-      - name: Pytest
-        run: pytest
