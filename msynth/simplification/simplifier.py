@@ -948,15 +948,22 @@ class Simplifier:
         # previously-separate subtrees.
         rewritten = DEFAULT_REWRITER.normalize(ast)
 
-        # Return the smallest form across the pipeline output, the post-
-        # substitution AST, and the closing-rewriter output that is verified
-        # equivalent to the original input. The stages are individually
-        # equivalence-preserving by construction, but a faulty algebraic rule
-        # anywhere in the pipeline (GAMBA pre/post rewriters, the closing
-        # rewriter, …) could in principle emit a non-equivalent form; gating the
-        # whole pipeline's output on a fast random/edge-case equivalence check
-        # guarantees the simplifier only ever returns a correct expression, and
-        # the original ``expr`` is always a sound fallback.
+        # Check against the original input: pipeline and rewriter candidates
+        # have not necessarily passed the subtree equivalence gate. In strict
+        # mode only UNSAT proves equivalence; SAT and UNKNOWN must fail closed.
+        # Rank unique candidates first to avoid redundant or unnecessary SMT
+        # queries. Stable ordering preserves the existing tie-breaking policy.
+        if self.enforce_equivalence:
+            candidates = dict.fromkeys((pipeline_output, ast, rewritten))
+            for candidate in sorted(candidates, key=binarized_node_count):
+                if candidate == expr or self.check_semantical_equivalence(
+                    expr, candidate
+                ) == z3.unsat:
+                    return candidate
+            return expr
+
+        # Non-strict mode retains its sampling-based acceptance policy. Passing
+        # these probes is not a proof of equivalence.
         equivalent = [
             candidate
             for candidate in (pipeline_output, ast, rewritten)

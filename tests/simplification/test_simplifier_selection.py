@@ -9,6 +9,10 @@ genuinely-more-compact binary form just because of representation.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+import z3
 from miasm.expression.expression import ExprId, ExprInt, ExprOp
 
 from msynth import Simplifier
@@ -49,3 +53,80 @@ def test_simplify_output_is_no_larger_than_input_binarized() -> None:
         out = s.simplify(expr)
         assert expressions_equivalent(expr, out) is not False
         assert node_count(out) <= node_count(expr)
+
+
+@pytest.mark.parametrize("mode", [PipelineMode.SIMBA, PipelineMode.GAMBA])
+@pytest.mark.parametrize("bits,key", [(8, 9), (16, 0x5678), (32, 0x12345678), (64, 0x12345678)])
+def test_strict_selection_preserves_rare_exception(mode, bits, key) -> None:
+    x = ExprId("x", bits)
+    t = x ^ ExprInt(key, bits)
+    original = x + (((t | -t) >> ExprInt(bits - 1, bits)) ^ ExprInt(1, bits))
+    simplifier = Simplifier(None, pipeline_mode=mode, enforce_equivalence=True)
+    result = simplifier.simplify(original)
+    assert simplifier.check_semantical_equivalence(original, result) == z3.unsat
+
+
+@pytest.mark.parametrize("verdict", [z3.sat, z3.unknown, z3.unsat])
+def test_strict_selection_checks_unique_candidate_once(monkeypatch, verdict) -> None:
+    simplifier = Simplifier(None, enforce_equivalence=True)
+    monkeypatch.setattr(type(simplifier.pipeline), "run", lambda self, expr: B)
+    calls = []
+
+    def check(original, candidate):
+        calls.append((original, candidate))
+        return verdict
+
+    def no_sampling(*args):
+        pytest.fail("Strict selection must not use the permissive gate")
+
+    monkeypatch.setattr(simplifier, "check_semantical_equivalence", check)
+    monkeypatch.setattr(simplifier, "_permissive_equivalent", no_sampling)
+    result = simplifier.simplify(A)
+    assert result == (B if verdict == z3.unsat else A)
+    assert calls == [(A, B)]
+
+
+def test_strict_selection_skips_identity_proof(monkeypatch) -> None:
+    simplifier = Simplifier(None, enforce_equivalence=True)
+
+    def no_proof(*args):
+        pytest.fail("Structural identity needs no solver query")
+
+    monkeypatch.setattr(simplifier, "check_semantical_equivalence", no_proof)
+    assert simplifier.simplify(A) == A
+
+
+def test_non_strict_selection_retains_sampling(monkeypatch) -> None:
+    simplifier = Simplifier(None, enforce_equivalence=False)
+    monkeypatch.setattr(type(simplifier.pipeline), "run", lambda self, expr: B)
+    monkeypatch.setattr(simplifier, "_permissive_equivalent", lambda *args: True)
+
+    def no_proof(*args):
+        pytest.fail("Non-strict selection must not require SMT")
+
+    monkeypatch.setattr(simplifier, "check_semantical_equivalence", no_proof)
+    assert simplifier.simplify(A) == B
+
+
+@pytest.mark.parametrize("accept_first", [False, True])
+def test_strict_selection_ranks_and_proves_all_stage_outputs(monkeypatch, accept_first) -> None:
+    simplifier = Simplifier(None, enforce_equivalence=True)
+    monkeypatch.setattr(type(simplifier.pipeline), "run", lambda self, expr: B)
+    monkeypatch.setattr(simplifier, "_reverse_global_unification", lambda *args: A + B)
+    monkeypatch.setattr(
+        "msynth.simplification.simplifier.DEFAULT_REWRITER",
+        SimpleNamespace(normalize=lambda expr: A),
+    )
+    calls = []
+
+    def check(original, candidate):
+        assert original == C
+        calls.append(candidate)
+        if accept_first or candidate == A + B:
+            return z3.unsat
+        return z3.unknown if candidate == B else z3.sat
+
+    monkeypatch.setattr(simplifier, "check_semantical_equivalence", check)
+    result = simplifier.simplify(C)
+    assert result == (B if accept_first else A + B)
+    assert calls == ([B] if accept_first else [B, A, A + B])
